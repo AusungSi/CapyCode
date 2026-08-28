@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePath, PureWindowsPath
 from typing import Literal
 
 EncodingName = Literal["utf-8", "utf-8-sig"]
@@ -39,6 +39,19 @@ class FileReadLedger:
 
 
 class LocalWorkspace:
+    DEFAULT_IGNORED_DIRECTORIES = frozenset(
+        {
+            ".capy",
+            ".git",
+            ".mypy_cache",
+            ".pytest_cache",
+            ".ruff_cache",
+            ".venv",
+            "__pycache__",
+            "node_modules",
+        }
+    )
+
     def __init__(self, root: Path, *, max_read_bytes: int = 1_000_000) -> None:
         self.root = root.resolve(strict=True)
         if not self.root.is_dir():
@@ -89,6 +102,42 @@ class LocalWorkspace:
             )
         )
         return content
+
+    def read_text_for_search(self, relative_path: str) -> str:
+        path = self.resolve_file(relative_path)
+        raw = self._read_bytes(path, relative_path)
+        content, _ = self._decode_text(raw, relative_path)
+        return content
+
+    def iter_files(
+        self,
+        relative_path: str = ".",
+        *,
+        pattern: str = "*",
+        max_results: int = 1_000,
+    ) -> list[str]:
+        if max_results <= 0:
+            raise ValueError("max_results must be positive")
+        directory = self.resolve_directory(relative_path)
+        matches: list[str] = []
+        candidates = sorted(directory.rglob("*"), key=lambda path: path.as_posix())
+        for candidate in candidates:
+            relative_candidate = candidate.relative_to(self.root)
+            if any(part in self.DEFAULT_IGNORED_DIRECTORIES for part in relative_candidate.parts):
+                continue
+            try:
+                resolved = candidate.resolve(strict=True)
+            except (FileNotFoundError, OSError):
+                continue
+            if not resolved.is_relative_to(self.root) or not resolved.is_file():
+                continue
+            relative = resolved.relative_to(self.root).as_posix()
+            if not PurePath(relative).match(pattern):
+                continue
+            matches.append(relative)
+            if len(matches) >= max_results:
+                break
+        return sorted(set(matches))
 
     def require_fresh_read(self, relative_path: str) -> FileReadRecord:
         path = self.resolve_file(relative_path)
