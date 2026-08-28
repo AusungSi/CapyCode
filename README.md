@@ -4,7 +4,7 @@
 
 ## 当前阶段
 
-当前开发阶段为 **P0-2 Workspace Tool Loop**。P0-0 工程骨架与 P0-1 流式运行时已经完成；当前 Baseline 包含：
+当前开发阶段为 **P0-3 Observability**。P0-0 工程骨架、P0-1 流式运行时与 P0-2 Workspace Tool Loop 已经完成；当前 Baseline 包含：
 
 - 统一 LLM Request/Response/Tool Call 类型
 - OpenAI-compatible Chat Completions 适配器
@@ -18,8 +18,9 @@
 - 读后再写、过期读取检测、原子替换与换行格式保持
 - 受控测试执行、只读 Git diff、循环检测与工具调用数量限制
 - 当前窗口连续上下文与本地会话恢复
+- Provider 中立事件、StepTrace、Token/Cost/Latency 与本地运行审计
 
-Trace、Context Snapshot 和 Anthropic 原生协议将在后续独立模块中实现。
+Context Snapshot 和 Anthropic 原生协议将在后续独立模块中实现。
 
 ## 本地安装
 
@@ -48,23 +49,34 @@ capycode --continue
 capycode --resume <会话 ID>
 ```
 
+查看当前代码目录最近的运行记录和某次运行详情：
+
+```powershell
+capycode runs
+capycode inspect-run <run ID 或唯一前缀>
+```
+
 `capycode` 会直接进入终端交互界面。输入普通文本执行任务，输入 `/` 展开命令菜单。当前提供：
 
 - `/help`：查看命令说明
 - `/config`：填写 Base URL 和 API Key，自动获取模型列表后选择模型
 - `/models`、`/model [model-id]`：查看真实模型列表并打开键盘选择器
+- `/pricing`：为当前真实模型配置输入/输出价格、币种和上下文窗口
 - `/workspace [path]`：查看和切换工作区
 - `/resume [会话 ID]`、`/continue`：选择历史会话或继续最近会话
 - `/sessions`、`/new`：列出历史会话或开始新会话
+- `/runs`：列出当前工作区最近的运行记录
 - `/status`、`/clear`、`/quit`：会话控制
 
 Slash Command 菜单支持方向键移动、Tab 补全和 Esc 关闭；普通输入支持方向键查找本次会话的历史任务。`/model` 打开独立模型选择面板，方向键选择、Enter 确认、Esc 取消。
 
 模型请求采用真实 SSE 流式传输：首个 Token 返回前显示轻量思考动画，开始输出后原位更新同一个 Markdown 消息；工具调用显示进行中、成功或失败状态。启动时显示短暂的 CapyCode 封面，进入会话后使用紧凑状态栏，将终端高度优先留给会话内容。
 
-`/config` 会按照 OpenAI-compatible 协议请求 `<Base URL>/models`。CapyCode 会保存服务端返回的完整模型列表以及当前选择；界面和状态栏只显示真实模型 ID，不显示内部路由别名。直接执行 `/model` 可使用方向键选择模型，Enter 确认，Esc 取消。本地配置保存在 `~/.capycode/settings.json`，不会写入项目仓库；模型环境变量仍作为无本地配置时的兼容回退。项目名 **CapyCode** 来自 Capability + Code，并与源码包 `capycode`、运行产物目录 `.capy` 保持一致。
+`/config` 会按照 OpenAI-compatible 协议请求 `<Base URL>/models`。CapyCode 直接使用并保存服务端返回的真实模型 ID，不再建立 `small`、`medium`、`strong` 等人工分级。直接执行 `/model` 可使用方向键切换真实模型；`/pricing` 为当前模型独立保存每百万 Token 输入/输出价格、币种、价格日期和上下文窗口。后续能力等级由 P1/P2 的能力测试与 Profile 生成，不根据模型名称猜测。本地配置保存在 `~/.capycode/settings.json`，不会写入项目仓库；旧版别名配置在首次读取时自动迁移。项目名 **CapyCode** 来自 Capability + Code，并与源码包 `capycode`、运行产物目录 `.capy` 保持一致。
 
 同一终端中的后续任务会沿用当前模型上下文。会话在每次用户消息、模型响应和工具结果后增量保存到 `~/.capycode/sessions/`；关闭终端后，在同一代码目录再次启动 `capycode`，输入 `/resume` 可通过键盘选择历史会话，输入 `/continue` 可直接继续最近会话。默认启动新会话，不会在未确认时自动加载历史内容；`/new` 会开始新会话，但不会删除历史记录。恢复范围严格限制为当前工作区，API Key 不进入会话文件。中断产生的未配对工具消息会在恢复时清理，文件会要求重新读取，旧终端中的后台进程不会恢复。
+
+每次用户任务都会创建新的 Run，并在 `<workspace>/.capy/runs/<run-id>/` 下生成追加式 `trace.jsonl` 和原子写入的 `summary.json`。恢复会话后继续沿用原 `session_id`，但使用新的 `run_id`。Trace 记录事件顺序、模型与工具延迟、Token、按配置估算的费用、测试状态、修改文件和终止原因；API Key、Authorization、Bearer Token 等敏感值在写入前统一脱敏。异常和取消路径同样生成 Summary，已发出的工具请求会补齐结构化失败结果。
 
 Linux/WSL：
 

@@ -13,8 +13,8 @@ def test_example_configuration_loads() -> None:
         Path("config/profiles.example.yaml"),
     )
 
-    assert set(bundle.models.models) == {"small", "medium", "strong"}
-    assert bundle.profiles.profiles["retrieval_fast"].model == "small"
+    assert set(bundle.models.models) == {"model-a", "model-b", "model-c"}
+    assert bundle.profiles.profiles["retrieval_fast"].model == "model-a"
 
 
 def test_inline_credentials_are_rejected(tmp_path: Path) -> None:

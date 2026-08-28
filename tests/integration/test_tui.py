@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -65,8 +66,7 @@ async def test_startup_splash_dismisses_without_using_conversation_space(
 @pytest.mark.asyncio
 async def test_slash_model_picker_switches_real_model(tmp_path: Path) -> None:
     store = UserSettingsStore(tmp_path / "settings.json")
-    store.configure_model(
-        "small",
+    store.configure_endpoint(
         model="model-a",
         base_url="https://example.test/v1",
         api_key="local-secret",
@@ -100,9 +100,15 @@ async def test_slash_model_picker_switches_real_model(tmp_path: Path) -> None:
         await pilot.pause()
 
         assert app.model_id == "model-c"
-        persisted = store.load().models["small"]
-        assert persisted.model == "model-c"
-        assert persisted.available_models == ["model-a", "model-b", "model-c", "model-d"]
+        persisted = store.load()
+        assert persisted.default_model == "model-c"
+        assert persisted.endpoint is not None
+        assert persisted.endpoint.available_models == [
+            "model-a",
+            "model-b",
+            "model-c",
+            "model-d",
+        ]
         status = app.query_one("#status-line", Static)
         assert "model-c" in str(status.render())
         assert "small" not in str(status.render())
@@ -143,11 +149,44 @@ async def test_config_dialog_saves_local_model_settings(tmp_path: Path) -> None:
         app.screen.query_one("#config-save", Button).press()
         await pilot.pause()
 
-        configured = store.load().models["small"]
-        assert configured.model == "demo-model"
-        assert configured.available_models == ["demo-model", "other-model"]
-        assert configured.base_url == "https://example.test/v1"
-        assert configured.api_key == "local-secret"
+        configured = store.load()
+        assert configured.default_model == "demo-model"
+        assert configured.endpoint is not None
+        assert configured.endpoint.available_models == ["demo-model", "other-model"]
+        assert configured.endpoint.base_url == "https://example.test/v1"
+        assert configured.endpoint.api_key == "local-secret"
+
+
+@pytest.mark.asyncio
+async def test_pricing_dialog_saves_price_for_real_model_id(tmp_path: Path) -> None:
+    store = UserSettingsStore(tmp_path / "settings.json")
+    store.configure_endpoint(
+        model="model-a",
+        base_url="https://example.test/v1",
+        api_key="local-secret",
+        available_models=["model-a", "model-b"],
+    )
+    app = CapyCodeApp(workspace=tmp_path, settings_store=store)
+
+    async with app.run_test() as pilot:
+        app.query_one("#prompt", Input).value = "/pricing"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        app.screen.query_one("#pricing-input", Input).value = "2.5"
+        app.screen.query_one("#pricing-output", Input).value = "10"
+        app.screen.query_one("#pricing-currency", Input).value = "cny"
+        app.screen.query_one("#pricing-context", Input).value = "200000"
+        app.screen.query_one("#pricing-date", Input).value = "2026-08-28"
+        app.screen.query_one("#pricing-save", Button).press()
+        await pilot.pause()
+
+        metadata = store.load().models["model-a"]
+        assert metadata.pricing.input_per_million == 2.5
+        assert metadata.pricing.output_per_million == 10
+        assert metadata.pricing.currency == "CNY"
+        assert metadata.pricing.snapshot_date == date(2026, 8, 28)
+        assert metadata.context_window == 200_000
 
 
 @pytest.mark.asyncio
@@ -170,12 +209,12 @@ async def test_slash_menu_supports_arrow_and_tab_completion(tmp_path: Path) -> N
 
 @pytest.mark.asyncio
 async def test_normal_prompt_runs_agent_and_keeps_session(tmp_path: Path) -> None:
-    calls: list[tuple[str, Path, str]] = []
+    calls: list[tuple[str, Path, str | None]] = []
 
     async def fake_runner(
         task: str,
         workspace: Path,
-        model_alias: str,
+        model_id: str | None,
         models_path: Path,
         max_steps: int,
         settings_store: UserSettingsStore | None,
@@ -183,14 +222,14 @@ async def test_normal_prompt_runs_agent_and_keeps_session(tmp_path: Path) -> Non
         session_state: SessionState | None,
         checkpoint: object,
     ) -> SessionState:
-        calls.append((task, workspace, model_alias))
+        calls.append((task, workspace, model_id))
         return SessionState(
             workspace=str(workspace),
             task=task,
             status="completed",
             step=1,
             final_answer="done",
-            current_model=model_alias,
+            current_model=model_id,
         )
 
     app = CapyCodeApp(
@@ -207,7 +246,7 @@ async def test_normal_prompt_runs_agent_and_keeps_session(tmp_path: Path) -> Non
         await pilot.pause()
         await app.workers.wait_for_complete()
 
-        assert calls == [("Read the repository", tmp_path, "small")]
+        assert calls == [("Read the repository", tmp_path, None)]
         assert app.last_session is not None
         assert app.last_session.final_answer == "done"
 
@@ -217,7 +256,7 @@ async def test_tui_updates_assistant_message_during_stream(tmp_path: Path) -> No
     async def streaming_runner(
         task: str,
         workspace: Path,
-        model_alias: str,
+        model_id: str | None,
         models_path: Path,
         max_steps: int,
         settings_store: UserSettingsStore | None,
@@ -290,7 +329,7 @@ async def test_session_can_resume_after_reopening_tui(tmp_path: Path) -> None:
     async def session_runner(
         task: str,
         workspace: Path,
-        model_alias: str,
+        model_id: str | None,
         models_path: Path,
         max_steps: int,
         settings_store: UserSettingsStore | None,

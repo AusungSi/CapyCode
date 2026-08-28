@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from capycode.app import cli
-from capycode.app.cli import main, run_doctor, show_welcome
+from capycode.app.cli import inspect_run, main, run_doctor, show_runs, show_welcome
+from capycode.trace import RunSummary
 
 
 def test_no_arguments_starts_branded_entrypoint(
@@ -89,12 +91,8 @@ def test_doctor_strict_mode_rejects_missing_secrets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     for name in (
-        "SMALL_BASE_URL",
-        "SMALL_API_KEY",
-        "MEDIUM_BASE_URL",
-        "MEDIUM_API_KEY",
-        "STRONG_BASE_URL",
-        "STRONG_API_KEY",
+        "CAPYCODE_BASE_URL",
+        "CAPYCODE_API_KEY",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -105,3 +103,52 @@ def test_doctor_strict_mode_rejects_missing_secrets(
     )
 
     assert code == 1
+
+
+def test_runs_and_inspect_run_read_local_summary(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    run_id = "a" * 32
+    run_directory = tmp_path / ".capy" / "runs" / run_id
+    run_directory.mkdir(parents=True)
+    now = datetime.now(UTC)
+    summary = RunSummary(
+        run_id=run_id,
+        session_id="session-one",
+        workspace=str(tmp_path),
+        task="test",
+        provider="fake",
+        model_id="fake-model",
+        status="completed",
+        termination_reason="completed",
+        started_at=now,
+        finished_at=now,
+        latency_seconds=1.25,
+        steps=2,
+        input_tokens=100,
+        output_tokens=20,
+        cost=0.001,
+        currency="CNY",
+        retry_count=0,
+        tool_requests=1,
+        tool_successes=1,
+        tool_failures=0,
+        tests_passed=True,
+        modified_files=["demo.py"],
+        trace_path=str(run_directory / "trace.jsonl"),
+        pricing_snapshot_date="2026-08-28",
+        pricing_configured=True,
+    )
+    (run_directory / "summary.json").write_text(summary.model_dump_json(indent=2), encoding="utf-8")
+
+    assert show_runs(tmp_path, limit=10) == 0
+    list_output = capsys.readouterr().out
+    assert run_id[:8] in list_output
+    assert "fake-model" in list_output
+
+    assert inspect_run(tmp_path, run_id[:8]) == 0
+    inspect_output = capsys.readouterr().out
+    assert f"run_id: {run_id}" in inspect_output
+    assert "tokens: 100 input, 20 output" in inspect_output
+    assert "modified_files: demo.py" in inspect_output

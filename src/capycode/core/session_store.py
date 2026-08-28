@@ -12,7 +12,7 @@ from capycode.llm import Message
 
 from .state import SessionState
 
-SESSION_VERSION = 1
+SESSION_VERSION = 2
 RESUME_NOTICE = (
     "This conversation was resumed from local history. Files and processes may have changed "
     "since the previous run. Re-read relevant files before modifying or relying on them. "
@@ -26,7 +26,7 @@ class SessionRecord(BaseModel):
     version: int = SESSION_VERSION
     session_id: str = Field(pattern=r"^[0-9a-f]{32}$")
     workspace: str
-    model_alias: str
+    model_id: str
     title: str
     created_at: datetime
     updated_at: datetime
@@ -39,7 +39,7 @@ class SessionSummary(BaseModel):
     session_id: str
     title: str
     workspace: str
-    model_alias: str
+    model_id: str
     created_at: datetime
     updated_at: datetime
     status: str
@@ -56,7 +56,7 @@ class SessionStore:
             else Path.home() / ".capycode" / "sessions"
         )
 
-    def save(self, state: SessionState, *, model_alias: str) -> SessionRecord:
+    def save(self, state: SessionState, *, model_id: str) -> SessionRecord:
         now = datetime.now(UTC)
         path = self._record_path(state.session_id)
         existing = self._read_record(path, strict=False)
@@ -65,7 +65,7 @@ class SessionStore:
         record = SessionRecord(
             session_id=state.session_id,
             workspace=str(Path(state.workspace).resolve()),
-            model_alias=model_alias,
+            model_id=model_id,
             title=title,
             created_at=created_at,
             updated_at=now,
@@ -103,7 +103,7 @@ class SessionStore:
                     session_id=record.session_id,
                     title=record.title,
                     workspace=record.workspace,
-                    model_alias=record.model_alias,
+                    model_id=record.model_id,
                     created_at=record.created_at,
                     updated_at=record.updated_at,
                     status=record.state.status,
@@ -152,6 +152,14 @@ class SessionStore:
     def _read_record(path: Path, *, strict: bool) -> SessionRecord | None:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict) and "model_alias" in payload and "model_id" not in payload:
+                state_payload = payload.get("state")
+                current_model = (
+                    state_payload.get("current_model") if isinstance(state_payload, dict) else None
+                )
+                payload["model_id"] = current_model or payload.pop("model_alias")
+                payload.pop("model_alias", None)
+                payload["version"] = SESSION_VERSION
             record = SessionRecord.model_validate(payload)
             if record.version != SESSION_VERSION or record.session_id != path.parent.name:
                 raise ValueError("unsupported or mismatched session record")
