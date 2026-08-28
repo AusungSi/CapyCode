@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from capycode.core import AgentRuntime
+from capycode.core import AgentRuntime, SessionState
 from capycode.llm import LLMResponse, ScriptedLLM, ToolCall, Usage
 from capycode.tools import build_p0_runtime_tools
 
@@ -113,3 +113,34 @@ async def test_runtime_stops_at_step_limit(tmp_path: Path) -> None:
     assert state.status == "failed"
     assert state.step == 1
     assert state.last_error == "maximum step limit reached: 1"
+
+
+@pytest.mark.asyncio
+async def test_runtime_continues_existing_conversation(tmp_path: Path) -> None:
+    client = ScriptedLLM(
+        [
+            LLMResponse(content="First answer"),
+            LLMResponse(content="Second answer"),
+        ]
+    )
+    runtime = AgentRuntime(client, build_p0_runtime_tools(), max_steps=2)
+    checkpoints: list[SessionState] = []
+
+    state = await runtime.run(
+        "First question",
+        tmp_path,
+        "fake-model",
+        checkpoint=lambda value: checkpoints.append(value.model_copy(deep=True)),
+    )
+    session_id = state.session_id
+    state = await runtime.run("Follow-up question", tmp_path, "fake-model", state=state)
+
+    assert state.session_id == session_id
+    assert [message.role for message in client.requests[1].messages] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert client.requests[1].messages[-1].content == "Follow-up question"
+    assert checkpoints[-1].status == "completed"

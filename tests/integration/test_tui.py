@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 from textual.widgets import Button, Input, OptionList, Select, Static
 
-from capycode.app.tui import CapyCodeApp, ChatMessage, ThinkingIndicator, ToolActivity
+from capycode.app.tui import (
+    CapyCodeApp,
+    ChatMessage,
+    SessionPickerScreen,
+    ThinkingIndicator,
+    ToolActivity,
+)
 from capycode.config import UserSettingsStore
 from capycode.core import RuntimeObserver, SessionState
+from capycode.llm import Message
 from capycode.tools import ToolResult
 
 
@@ -172,6 +180,8 @@ async def test_normal_prompt_runs_agent_and_keeps_session(tmp_path: Path) -> Non
         max_steps: int,
         settings_store: UserSettingsStore | None,
         observer: RuntimeObserver | None,
+        session_state: SessionState | None,
+        checkpoint: object,
     ) -> SessionState:
         calls.append((task, workspace, model_alias))
         return SessionState(
@@ -212,6 +222,8 @@ async def test_tui_updates_assistant_message_during_stream(tmp_path: Path) -> No
         max_steps: int,
         settings_store: UserSettingsStore | None,
         observer: RuntimeObserver | None,
+        session_state: SessionState | None,
+        checkpoint: object,
     ) -> SessionState:
         assert observer is not None
         await observer.on_model_start(1)
@@ -253,3 +265,102 @@ async def test_tui_updates_assistant_message_during_stream(tmp_path: Path) -> No
         assert len(app.query(ThinkingIndicator)) == 0
         tool = app.query_one(ToolActivity)
         assert tool.has_class("tool-success")
+
+
+def test_tool_activity_compacts_long_failure_output() -> None:
+    activity = ToolActivity("run_tests", "python -m pytest -q")
+
+    activity.finish(
+        ToolResult(
+            status="error",
+            content="Tests exited with code 1.\n" + "failure details " * 100,
+        )
+    )
+
+    assert activity.has_class("tool-error")
+    assert len(str(activity.render())) < 220
+    assert "Tests exited with code 1." in str(activity.render())
+
+
+@pytest.mark.asyncio
+async def test_session_can_resume_after_reopening_tui(tmp_path: Path) -> None:
+    settings = UserSettingsStore(tmp_path / "local" / "settings.json")
+    received_states: list[SessionState | None] = []
+
+    async def session_runner(
+        task: str,
+        workspace: Path,
+        model_alias: str,
+        models_path: Path,
+        max_steps: int,
+        settings_store: UserSettingsStore | None,
+        observer: RuntimeObserver | None,
+        session_state: SessionState | None,
+        checkpoint: Callable[[SessionState], None] | None,
+    ) -> SessionState:
+        received_states.append(session_state)
+        if session_state is None:
+            state = SessionState(
+                workspace=str(workspace),
+                task=task,
+                status="completed",
+                final_answer="first answer",
+                history=[
+                    Message(role="system", content="system"),
+                    Message(role="user", content=task),
+                    Message(role="assistant", content="first answer"),
+                ],
+            )
+        else:
+            state = session_state
+            state.task = task
+            state.status = "completed"
+            state.final_answer = "follow-up answer"
+            state.history.extend(
+                [
+                    Message(role="user", content=task),
+                    Message(role="assistant", content="follow-up answer"),
+                ]
+            )
+        if checkpoint is not None:
+            checkpoint(state)
+        return state
+
+    first_app = CapyCodeApp(
+        workspace=tmp_path,
+        models_path=Path("config/models.example.yaml"),
+        settings_store=settings,
+        task_runner=session_runner,
+    )
+    async with first_app.run_test() as pilot:
+        first_app.query_one("#prompt", Input).value = "first task"
+        await pilot.press("enter")
+        await first_app.workers.wait_for_complete()
+
+    second_app = CapyCodeApp(
+        workspace=tmp_path,
+        models_path=Path("config/models.example.yaml"),
+        settings_store=settings,
+        task_runner=session_runner,
+    )
+    async with second_app.run_test() as pilot:
+        second_app.query_one("#prompt", Input).value = "/resume"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(second_app.screen, SessionPickerScreen)
+        await pilot.press("enter")
+        await pilot.pause()
+
+        restored_id = second_app.last_session.session_id if second_app.last_session else None
+        assert restored_id is not None
+        restored_messages = second_app.query(ChatMessage)
+        assert len(restored_messages) == 2
+
+        second_app.query_one("#prompt", Input).value = "follow up"
+        await pilot.press("enter")
+        await second_app.workers.wait_for_complete()
+
+        assert received_states[-1] is not None
+        assert received_states[-1].session_id == restored_id
+        assert second_app.last_session is not None
+        assert second_app.last_session.final_answer == "follow-up answer"

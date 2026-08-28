@@ -4,19 +4,22 @@
 
 ## 当前阶段
 
-当前开发阶段为 **P0-1 Runtime Skeleton**。P0-0 工程骨架已经完成；本阶段新增：
+当前开发阶段为 **P0-2 Workspace Tool Loop**。P0-0 工程骨架与 P0-1 流式运行时已经完成；当前 Baseline 包含：
 
 - 统一 LLM Request/Response/Tool Call 类型
 - OpenAI-compatible Chat Completions 适配器
 - `SessionState` 与最小 Agent Loop
-- 受 Workspace 边界保护的 `read_file`
+- 受 Workspace 边界保护的完整文件与命令工具链
 - FakeLLM 确定性双轮闭环
 - Textual 全屏终端界面和 Slash Command
 - 用户目录下的本地模型与凭据配置
 - OpenAI-compatible SSE 流式输出和增量工具调用组装
 - 用户、Agent、工具与系统状态分层消息视图
+- 读后再写、过期读取检测、原子替换与换行格式保持
+- 受控测试执行、只读 Git diff、循环检测与工具调用数量限制
+- 当前窗口连续上下文与本地会话恢复
 
-完整 Coding Tool Loop 和 Trace 将在后续独立模块中实现。
+Trace、Context Snapshot 和 Anthropic 原生协议将在后续独立模块中实现。
 
 ## 本地安装
 
@@ -38,25 +41,56 @@ py -3.11 -m uv tool install --python 3.11 --editable .
 capycode
 ```
 
+也可以从当前代码目录直接恢复最近会话或指定会话：
+
+```powershell
+capycode --continue
+capycode --resume <会话 ID>
+```
+
 `capycode` 会直接进入终端交互界面。输入普通文本执行任务，输入 `/` 展开命令菜单。当前提供：
 
 - `/help`：查看命令说明
 - `/config`：填写 Base URL 和 API Key，自动获取模型列表后选择模型
 - `/models`、`/model [model-id]`：查看真实模型列表并打开键盘选择器
 - `/workspace [path]`：查看和切换工作区
+- `/resume [会话 ID]`、`/continue`：选择历史会话或继续最近会话
+- `/sessions`、`/new`：列出历史会话或开始新会话
 - `/status`、`/clear`、`/quit`：会话控制
 
 Slash Command 菜单支持方向键移动、Tab 补全和 Esc 关闭；普通输入支持方向键查找本次会话的历史任务。`/model` 打开独立模型选择面板，方向键选择、Enter 确认、Esc 取消。
 
-模型请求采用真实 SSE 流式传输：首个 Token 返回前显示轻量思考动画，开始输出后原位更新同一个 Markdown 消息；工具调用显示进行中、成功或失败状态。主界面移除了占用空间的欢迎横幅和 Footer，将终端高度优先留给会话内容。
+模型请求采用真实 SSE 流式传输：首个 Token 返回前显示轻量思考动画，开始输出后原位更新同一个 Markdown 消息；工具调用显示进行中、成功或失败状态。启动时显示短暂的 CapyCode 封面，进入会话后使用紧凑状态栏，将终端高度优先留给会话内容。
 
 `/config` 会按照 OpenAI-compatible 协议请求 `<Base URL>/models`。CapyCode 会保存服务端返回的完整模型列表以及当前选择；界面和状态栏只显示真实模型 ID，不显示内部路由别名。直接执行 `/model` 可使用方向键选择模型，Enter 确认，Esc 取消。本地配置保存在 `~/.capycode/settings.json`，不会写入项目仓库；模型环境变量仍作为无本地配置时的兼容回退。项目名 **CapyCode** 来自 Capability + Code，并与源码包 `capycode`、运行产物目录 `.capy` 保持一致。
+
+同一终端中的后续任务会沿用当前模型上下文。会话在每次用户消息、模型响应和工具结果后增量保存到 `~/.capycode/sessions/`；关闭终端后，在同一代码目录再次启动 `capycode`，输入 `/resume` 可通过键盘选择历史会话，输入 `/continue` 可直接继续最近会话。默认启动新会话，不会在未确认时自动加载历史内容；`/new` 会开始新会话，但不会删除历史记录。恢复范围严格限制为当前工作区，API Key 不进入会话文件。中断产生的未配对工具消息会在恢复时清理，文件会要求重新读取，旧终端中的后台进程不会恢复。
 
 Linux/WSL：
 
 ```bash
 uv sync --extra dev
 ```
+
+## Workspace 工具与安全约束
+
+模型当前可以调用：
+
+- `list_files`、`search_code`、`read_file`
+- `write_file`、`replace_text`
+- `run_command`、`run_tests`
+- `process_status`、`stop_process`
+- `git_diff`
+
+所有文件路径都必须位于当前工作区。绝对路径、UNC 网络路径、路径穿越和越界符号链接会被拒绝；`.git`、`.venv`、`node_modules` 等生成目录不会进入文件发现结果。
+
+修改已有文件前必须先完整调用 `read_file`。CapyCode 会记录内容摘要、修改时间、文件大小、编码和换行格式；如果文件在读取后被外部程序改动，写入会被拒绝并要求重新读取。写入使用同目录临时文件和原子替换，已有 UTF-8 BOM、LF、CRLF 或 CR 风格会被保留。
+
+命令工具只接受 `argv` 数组，不调用二级 Shell。开发程序默认可运行；PowerShell、CMD、Bash 等二级 Shell 和高风险系统入口会被静态策略阻止，Git 在通用命令中仅开放只读子命令。命令工作目录和显式路径参数必须留在工作区内，敏感环境变量不会传入子进程，stdout 与 stderr 使用有界首尾保留。
+
+服务器和其他持续运行的程序应设置 `run_in_background=true`。工具会立即返回任务 ID，后续使用 `process_status` 查看状态，使用 `stop_process` 结束；Agent 运行结束时仍存活的后台任务会被统一清理。前台命令超时后会提示改用后台模式。`python -c`、Node `-e/--eval` 可用于一次性检查，不再因形式本身被拒绝。
+
+`search_code` 的 `path` 可以是单个文件或目录。`git_diff` 会先检查仓库状态；对于普通非 Git 目录，它返回“diff 不可用”而不是执行错误，Agent 不会再通过通用命令反复尝试 Git。
 
 ## 骨架验收
 

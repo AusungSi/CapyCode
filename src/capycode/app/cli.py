@@ -20,6 +20,18 @@ def build_parser() -> argparse.ArgumentParser:
         description="Profiled capability routing coding agent",
     )
     parser.add_argument("--version", action="version", version=__version__)
+    resume_group = parser.add_mutually_exclusive_group()
+    resume_group.add_argument(
+        "--continue",
+        dest="continue_session",
+        action="store_true",
+        help="continue the most recent conversation in the current workspace",
+    )
+    resume_group.add_argument(
+        "--resume",
+        metavar="SESSION_ID",
+        help="resume a conversation in the current workspace",
+    )
     subparsers = parser.add_subparsers(dest="command")
 
     doctor = subparsers.add_parser("doctor", help="validate local project configuration")
@@ -42,6 +54,9 @@ def build_parser() -> argparse.ArgumentParser:
     tui.add_argument("--workspace", type=Path, default=Path.cwd())
     tui.add_argument("--model", default=None, help="initial model alias")
     tui.add_argument("--models", type=Path, default=DEFAULT_MODELS_PATH)
+    tui_resume_group = tui.add_mutually_exclusive_group()
+    tui_resume_group.add_argument("--continue", dest="continue_session", action="store_true")
+    tui_resume_group.add_argument("--resume", metavar="SESSION_ID")
     return parser
 
 
@@ -122,7 +137,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = parser.parse_args(argv)
     try:
         if args.command is None:
-            launch_tui()
+            initial_resume = args.resume or ("latest" if args.continue_session else None)
+            if initial_resume is None:
+                launch_tui()
+            else:
+                launch_tui(initial_resume=initial_resume)
             code = 0
         elif args.command == "doctor":
             code = run_doctor(args.models, args.profiles, strict_secrets=args.strict_secrets)
@@ -141,6 +160,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 workspace=args.workspace,
                 model_alias=args.model,
                 models_path=args.models,
+                initial_resume=args.resume or ("latest" if args.continue_session else None),
             )
             code = 0
         else:

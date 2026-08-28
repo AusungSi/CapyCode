@@ -23,7 +23,7 @@ from textual.widgets.option_list import Option
 
 from capycode.config.loader import DEFAULT_MODELS_PATH, load_models
 from capycode.config.user_settings import UserModelSettings, UserSettingsStore
-from capycode.core import RuntimeObserver, SessionState
+from capycode.core import RuntimeObserver, SessionState, SessionStore, SessionSummary
 from capycode.tools import ToolResult
 
 from .runtime import discover_models, execute_task
@@ -37,6 +37,8 @@ TaskRunner = Callable[
         int,
         UserSettingsStore | None,
         RuntimeObserver | None,
+        SessionState | None,
+        Callable[[SessionState], None] | None,
     ],
     Awaitable[SessionState],
 ]
@@ -56,6 +58,10 @@ COMMANDS = (
     SlashCommand("/models", "/models", "列出服务端返回的可用模型"),
     SlashCommand("/model", "/model [model-id]", "打开模型选择器或直接切换"),
     SlashCommand("/workspace", "/workspace [path]", "查看或切换工作区"),
+    SlashCommand("/resume", "/resume [会话 ID]", "选择并恢复当前工作区的会话"),
+    SlashCommand("/continue", "/continue", "继续当前工作区最近的会话"),
+    SlashCommand("/sessions", "/sessions", "列出当前工作区的历史会话"),
+    SlashCommand("/new", "/new", "开始一个新会话"),
     SlashCommand("/status", "/status", "显示当前会话状态"),
     SlashCommand("/clear", "/clear", "清空会话显示"),
     SlashCommand("/quit", "/quit", "退出 CapyCode"),
@@ -161,7 +167,12 @@ class ToolActivity(Static):
             self.update(f"✓  {self.tool_name}  {self.target}")
         else:
             self.add_class("tool-error")
-            self.update(f"×  {self.tool_name}  {result.content}")
+            summary = next(
+                (line.strip() for line in result.content.splitlines() if line.strip()), "failed"
+            )
+            if len(summary) > 160:
+                summary = summary[:157] + "..."
+            self.update(f"×  {self.tool_name}  {summary}")
 
 
 class ThinkingIndicator(Static):
@@ -427,6 +438,76 @@ class ModelPickerScreen(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+class SessionPickerScreen(ModalScreen[str | None]):
+    BINDINGS: ClassVar[list[BindingType]] = [("escape", "cancel", "取消")]
+
+    CSS = """
+    SessionPickerScreen {
+        align: center middle;
+        background: $background 70%;
+    }
+
+    #session-picker-dialog {
+        width: 88;
+        height: auto;
+        max-height: 80%;
+        border: round $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #session-picker-title {
+        text-style: bold;
+    }
+
+    #session-picker-list {
+        height: auto;
+        max-height: 16;
+        margin: 1 0;
+    }
+
+    #session-picker-hint {
+        color: $text-muted;
+    }
+    """
+
+    def __init__(self, sessions: list[SessionSummary], current_id: str | None) -> None:
+        super().__init__()
+        self.sessions = sessions
+        self.current_id = current_id
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="session-picker-dialog"):
+            yield Label("恢复会话", id="session-picker-title")
+            yield OptionList(
+                *[
+                    Option(
+                        (
+                            f"{'●' if item.session_id == self.current_id else ' '}  "
+                            f"{item.title}  [dim]{item.updated_at.astimezone():%m-%d %H:%M}"
+                            f"  {item.session_id[:8]}[/dim]"
+                        ),
+                        id=item.session_id,
+                    )
+                    for item in self.sessions
+                ],
+                id="session-picker-list",
+            )
+            yield Static("↑/↓ 选择  ·  Enter 恢复  ·  Esc 取消", id="session-picker-hint")
+
+    def on_mount(self) -> None:
+        picker = self.query_one("#session-picker-list", OptionList)
+        picker.highlighted = 0
+        picker.focus()
+
+    @on(OptionList.OptionSelected, "#session-picker-list")
+    def select_session(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(event.option_id)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class CapyCodeApp(App[None]):
     TITLE = "CapyCode"
     SUB_TITLE = "Local Coding Agent"
@@ -537,6 +618,8 @@ class CapyCodeApp(App[None]):
         models_path: Path = DEFAULT_MODELS_PATH,
         max_steps: int = 10,
         settings_store: UserSettingsStore | None = None,
+        session_store: SessionStore | None = None,
+        initial_resume: str | None = None,
         task_runner: TaskRunner = execute_task,
         model_fetcher: ModelFetcher = discover_models,
     ) -> None:
@@ -545,12 +628,16 @@ class CapyCodeApp(App[None]):
         self.models_path = models_path
         self.max_steps = max_steps
         self.settings_store = settings_store or UserSettingsStore()
+        self.session_store = session_store or SessionStore(
+            self.settings_store.path.parent / "sessions"
+        )
         settings = self.settings_store.load()
         self.model_alias = model_alias or settings.default_model
         configured = settings.models.get(self.model_alias)
         self.model_id = configured.model if configured else None
         self.task_runner = task_runner
         self.model_fetcher = model_fetcher
+        self.initial_resume = initial_resume
         self.busy = False
         self.last_session: SessionState | None = None
         self.prompt_history: list[str] = []
@@ -588,10 +675,20 @@ class CapyCodeApp(App[None]):
 
     def on_mount(self) -> None:
         self._refresh_session_bar()
-        self._write_system("输入任务开始工作，输入 / 查看命令。")
+        sessions = self.session_store.list(self.workspace)
+        resume_hint = (
+            f" 检测到 {len(sessions)} 个历史会话，可输入 /resume 恢复。" if sessions else ""
+        )
+        self._write_system(f"输入任务开始工作，输入 / 查看命令。{resume_hint}")
         self._refresh_status()
         self.query_one("#prompt", Input).focus()
         self.set_timer(1.15, self._dismiss_splash)
+        if self.initial_resume is not None:
+            self.set_timer(0.05, self._resume_initial_session)
+
+    def _resume_initial_session(self) -> None:
+        assert self.initial_resume is not None
+        self._resume_session(self.initial_resume)
 
     @on(Input.Changed, "#prompt")
     def show_slash_commands(self, event: Input.Changed) -> None:
@@ -718,6 +815,14 @@ class CapyCodeApp(App[None]):
             await self._select_model(argument)
         elif command == "/workspace":
             self._select_workspace(argument)
+        elif command == "/sessions":
+            self._show_sessions()
+        elif command == "/resume":
+            self._resume_session(argument)
+        elif command == "/continue":
+            self._resume_session("latest")
+        elif command == "/new":
+            self._new_session()
         elif command == "/config":
             self._open_config()
         else:
@@ -796,7 +901,74 @@ class CapyCodeApp(App[None]):
             self._write_error(f"工作区不存在或不是目录：{candidate}")
             return
         self.workspace = candidate
-        self._write_system(f"已切换工作区：{candidate}")
+        self.last_session = None
+        count = len(self.session_store.list(candidate))
+        suffix = f"，发现 {count} 个历史会话，可用 /resume 恢复" if count else ""
+        self._write_system(f"已切换工作区：{candidate}{suffix}")
+        self._refresh_status()
+
+    def _show_sessions(self) -> None:
+        sessions = self.session_store.list(self.workspace)
+        if not sessions:
+            self._write_system("当前工作区还没有历史会话。")
+            return
+        current_id = self.last_session.session_id if self.last_session else None
+        lines = [
+            (
+                f"{'●' if item.session_id == current_id else ' '} "
+                f"{item.session_id[:8]}  {item.updated_at.astimezone():%Y-%m-%d %H:%M}  "
+                f"{item.title}"
+            )
+            for item in sessions
+        ]
+        self._write_system("当前工作区的会话：\n" + "\n".join(lines))
+
+    def _resume_session(self, value: str) -> None:
+        if self.busy:
+            self._write_error("当前任务仍在执行，完成或取消后才能切换会话。")
+            return
+        if not value:
+            sessions = self.session_store.list(self.workspace)
+            if not sessions:
+                self._write_system("当前工作区还没有历史会话。")
+                return
+            current_id = self.last_session.session_id if self.last_session else None
+            self.push_screen(
+                SessionPickerScreen(sessions, current_id),
+                self._session_picker_closed,
+            )
+            return
+        try:
+            record = self.session_store.resolve(value, self.workspace)
+        except (OSError, ValueError) as exc:
+            self._write_error(str(exc))
+            return
+        self._apply_resumed_session(record.state, record.title)
+
+    def _session_picker_closed(self, session_id: str | None) -> None:
+        if session_id is not None:
+            self._resume_session(session_id)
+
+    def _apply_resumed_session(self, state: SessionState, title: str) -> None:
+        self.last_session = state
+        self.action_clear_transcript()
+        for message in state.history:
+            if message.role == "user" and message.content:
+                self._write_user(message.content)
+            elif message.role == "assistant" and message.content:
+                self._write_assistant(message.content)
+        self._write_system(
+            f"已恢复会话 {state.session_id[:8]}：{title}。文件状态可能已变化，后续会重新检查。"
+        )
+        self._refresh_status()
+
+    def _new_session(self) -> None:
+        if self.busy:
+            self._write_error("当前任务仍在执行，完成或取消后才能新建会话。")
+            return
+        self.last_session = None
+        self.action_clear_transcript()
+        self._write_system("已开始新会话。历史会话仍保存在本机，可随时用 /resume 恢复。")
         self._refresh_status()
 
     def _open_config(self) -> None:
@@ -840,6 +1012,8 @@ class CapyCodeApp(App[None]):
                 self.max_steps,
                 self.settings_store,
                 self,
+                self.last_session,
+                self._checkpoint_session,
             )
             self.last_session = state
             if state.final_answer and not self.received_stream_delta:
@@ -854,6 +1028,10 @@ class CapyCodeApp(App[None]):
             self.busy = False
             self._refresh_status()
             self.query_one("#prompt", Input).focus()
+
+    def _checkpoint_session(self, state: SessionState) -> None:
+        self.last_session = state
+        self.session_store.save(state, model_alias=self.model_alias)
 
     async def on_model_start(self, step: int) -> None:
         self.streaming_message = None
@@ -876,7 +1054,13 @@ class CapyCodeApp(App[None]):
 
     async def on_tool_start(self, name: str, arguments: dict[str, object]) -> None:
         await self._stop_thinking()
-        target = str(arguments.get("path") or arguments.get("cwd") or "")
+        argv = arguments.get("argv")
+        if isinstance(argv, list):
+            target = " ".join(str(part) for part in argv[:4])
+        else:
+            target = str(
+                arguments.get("path") or arguments.get("task_id") or arguments.get("cwd") or ""
+            )
         self.active_tool = ToolActivity(name, target)
         transcript = self.query_one("#transcript", VerticalScroll)
         await transcript.mount(self.active_tool)
@@ -927,7 +1111,11 @@ class CapyCodeApp(App[None]):
 
     def _status_text(self) -> str:
         state = "运行中" if self.busy else "就绪"
-        return f"{state}  ·  model: {self.model_id or '未配置'}  ·  workspace: {self.workspace}"
+        session = self.last_session.session_id[:8] if self.last_session else "new"
+        return (
+            f"{state}  ·  model: {self.model_id or '未配置'}  ·  session: {session}"
+            f"  ·  workspace: {self.workspace}"
+        )
 
     def _refresh_status(self) -> None:
         self.query_one("#status-line", Static).update(self._status_text())
@@ -945,9 +1133,11 @@ def launch_tui(
     workspace: Path | None = None,
     model_alias: str | None = None,
     models_path: Path = DEFAULT_MODELS_PATH,
+    initial_resume: str | None = None,
 ) -> None:
     CapyCodeApp(
         workspace=workspace,
         model_alias=model_alias,
         models_path=models_path,
+        initial_resume=initial_resume,
     ).run()

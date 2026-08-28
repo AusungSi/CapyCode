@@ -35,6 +35,9 @@ class Tool(ABC):
     async def execute(self, arguments: ToolInput, workspace: LocalWorkspace) -> ToolResult:
         raise NotImplementedError
 
+    async def aclose(self) -> None:
+        return None
+
 
 class ToolRegistry:
     def __init__(self, tools: list[Tool]) -> None:
@@ -50,11 +53,24 @@ class ToolRegistry:
     def definitions(self) -> list[ToolDefinition]:
         return [self._tools[name].definition() for name in sorted(self._tools)]
 
+    async def aclose(self) -> None:
+        for tool in self._tools.values():
+            await tool.aclose()
+
 
 class ToolExecutor:
-    def __init__(self, registry: ToolRegistry, workspace: LocalWorkspace) -> None:
+    def __init__(
+        self,
+        registry: ToolRegistry,
+        workspace: LocalWorkspace,
+        *,
+        max_result_characters: int = 40_000,
+    ) -> None:
+        if max_result_characters < 256:
+            raise ValueError("max_result_characters must be at least 256")
         self.registry = registry
         self.workspace = workspace
+        self.max_result_characters = max_result_characters
 
     async def execute(self, name: str, arguments: dict[str, Any]) -> ToolResult:
         tool = self.registry.get(name)
@@ -62,8 +78,35 @@ class ToolExecutor:
             return ToolResult(status="error", content=f"unknown tool: {name}")
         try:
             parsed = tool.input_model.model_validate(arguments)
-            return await tool.execute(parsed, self.workspace)
+            result = await tool.execute(parsed, self.workspace)
+            return self._limit_result(result)
         except ValidationError as exc:
             return ToolResult(status="error", content=f"invalid tool arguments: {exc}")
         except (OSError, ValueError) as exc:
             return ToolResult(status="error", content=f"{type(exc).__name__}: {exc}")
+        except Exception as exc:
+            return ToolResult(
+                status="error",
+                content=f"unexpected {tool.name} failure: {type(exc).__name__}: {exc}",
+            )
+
+    def _limit_result(self, result: ToolResult) -> ToolResult:
+        if len(result.content) <= self.max_result_characters:
+            return result
+        marker = "\n\n... tool result truncated ...\n\n"
+        available = self.max_result_characters - len(marker)
+        head_size = available // 2
+        tail_size = available - head_size
+        data = dict(result.data)
+        data.update(
+            {
+                "truncated": True,
+                "original_characters": len(result.content),
+            }
+        )
+        return result.model_copy(
+            update={
+                "content": result.content[:head_size] + marker + result.content[-tail_size:],
+                "data": data,
+            }
+        )

@@ -47,6 +47,29 @@ def test_version_command(capsys: pytest.CaptureFixture[str]) -> None:
     assert capsys.readouterr().out.strip() == "0.1.0"
 
 
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [(["--continue"], "latest"), (["--resume", "abc123"], "abc123")],
+)
+def test_resume_flags_launch_tui_with_requested_session(
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: list[str],
+    expected: str,
+) -> None:
+    received: list[str | None] = []
+
+    def fake_launch_tui(*, initial_resume: str | None = None) -> None:
+        received.append(initial_resume)
+
+    monkeypatch.setattr(cli, "launch_tui", fake_launch_tui)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(arguments)
+
+    assert exc_info.value.code == 0
+    assert received == [expected]
+
+
 def test_doctor_accepts_valid_examples_without_secrets(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

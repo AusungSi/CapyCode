@@ -22,8 +22,17 @@ class ReadFileTool(Tool):
         if not isinstance(arguments, ReadFileInput):
             raise TypeError("read_file received an unexpected argument model")
         content = workspace.read_text(arguments.path)
+        record = workspace.read_ledger.get(workspace.resolve_file(arguments.path))
+        if record is None:
+            raise RuntimeError("read ledger was not updated")
         return ToolResult(
             status="success",
             content=content,
-            data={"path": arguments.path, "characters": len(content)},
+            data={
+                "path": arguments.path,
+                "characters": len(content),
+                "digest": record.digest,
+                "encoding": record.encoding,
+                "newline": record.newline,
+            },
         )
