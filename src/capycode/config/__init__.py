@@ -10,6 +10,8 @@ from .loader import (
 from .models import ModelRegistryConfig, ProfileRegistryConfig
 from .user_settings import (
     ResolvedModel,
+    UserEndpointSettings,
+    UserModelPricing,
     UserModelSettings,
     UserSettings,
     UserSettingsStore,
@@ -22,6 +24,8 @@ __all__ = [
     "ModelRegistryConfig",
     "ProfileRegistryConfig",
     "ResolvedModel",
+    "UserEndpointSettings",
+    "UserModelPricing",
     "UserModelSettings",
     "UserSettings",
     "UserSettingsStore",

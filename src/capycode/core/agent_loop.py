@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from collections.abc import Callable
 from pathlib import Path
 
 from capycode.llm import LLMClient, LLMRequest, Message
 from capycode.tools import ToolExecutor, ToolRegistry, ToolResult
+from capycode.trace import RunTracker, RunTrackingConfig, ToolCallTrace
 from capycode.workspace import LocalWorkspace
 
 from .observer import NullRuntimeObserver, RuntimeObserver
@@ -53,6 +55,7 @@ class AgentRuntime:
         observer: RuntimeObserver | None = None,
         state: SessionState | None = None,
         checkpoint: Callable[[SessionState], None] | None = None,
+        tracking: RunTrackingConfig | None = None,
     ) -> SessionState:
         if not task.strip():
             raise ValueError("task cannot be empty")
@@ -87,6 +90,11 @@ class AgentRuntime:
             state.step = 0
             state.current_model = model
             state.history.append(Message(role="user", content=task))
+        tracker = RunTracker(workspace.root, state.session_id, tracking) if tracking else None
+        if tracker is not None:
+            tracker.start(task)
+            state.current_run_id = tracker.run_id
+            state.last_trace_path = str(tracker.trace_path)
         self._checkpoint(state, checkpoint)
         previous_tool_signature: str | None = None
         repeated_tool_steps = 0
@@ -95,6 +103,15 @@ class AgentRuntime:
             for step in range(1, self.max_steps + 1):
                 state.step = step
                 await runtime_observer.on_model_start(step)
+                model_started = time.perf_counter()
+                first_token_at: float | None = None
+
+                async def observe_text_delta(delta: str) -> None:
+                    nonlocal first_token_at
+                    if first_token_at is None:
+                        first_token_at = time.perf_counter()
+                    await runtime_observer.on_text_delta(delta)
+
                 response = await self.client.stream(
                     LLMRequest(
                         model=model,
@@ -102,10 +119,18 @@ class AgentRuntime:
                         tools=self.tools.definitions(),
                         max_output_tokens=self.max_output_tokens,
                     ),
-                    runtime_observer.on_text_delta,
+                    observe_text_delta,
                 )
+                model_latency = time.perf_counter() - model_started
                 state.total_input_tokens += response.usage.input_tokens
                 state.total_output_tokens += response.usage.output_tokens
+                state.total_latency += model_latency
+                if tracker is not None:
+                    state.total_cost += tracker.calculate_cost(
+                        response.usage.input_tokens,
+                        response.usage.output_tokens,
+                    )
+                    tracker.record_assistant(step, response)
                 state.history.append(
                     Message(
                         role="assistant",
@@ -130,8 +155,12 @@ class AgentRuntime:
 
                     exceeded_tool_limit = len(response.tool_calls) > self.max_tool_calls_per_step
                     seen_tool_calls: set[str] = set()
+                    tool_traces: list[ToolCallTrace] = []
                     for index, call in enumerate(response.tool_calls):
                         await runtime_observer.on_tool_start(call.name, call.arguments)
+                        if tracker is not None:
+                            tracker.record_tool_request(step, call.id, call.name, call.arguments)
+                        tool_started = time.perf_counter()
                         call_signature = json.dumps(
                             (call.name, call.arguments),
                             ensure_ascii=True,
@@ -152,6 +181,18 @@ class AgentRuntime:
                         else:
                             seen_tool_calls.add(call_signature)
                             result = await executor.execute(call.name, call.arguments)
+                        tool_latency = time.perf_counter() - tool_started
+                        state.total_latency += tool_latency
+                        if tracker is not None:
+                            tool_traces.append(
+                                tracker.record_tool_result(
+                                    step,
+                                    call.id,
+                                    call.name,
+                                    result,
+                                    tool_latency,
+                                )
+                            )
                         await runtime_observer.on_tool_result(call.name, result)
                         state.history.append(
                             Message(
@@ -163,6 +204,18 @@ class AgentRuntime:
                         )
                         self._update_state_from_tool(state, call.name, result)
                         self._checkpoint(state, checkpoint)
+                    if tracker is not None:
+                        tracker.record_step(
+                            step,
+                            response,
+                            latency_seconds=model_latency,
+                            first_token_latency_seconds=(
+                                first_token_at - model_started
+                                if first_token_at is not None
+                                else None
+                            ),
+                            tools=tool_traces,
+                        )
                     if exceeded_tool_limit:
                         state.status = "failed"
                         state.termination_reason = "tool_call_limit_exceeded"
@@ -170,38 +223,65 @@ class AgentRuntime:
                             f"model requested {len(response.tool_calls)} tools in one step; "
                             f"limit is {self.max_tool_calls_per_step}"
                         )
+                        self._finish_tracking(state, tracker)
                         self._checkpoint(state, checkpoint)
                         return state
                     if repeated_tool_steps >= 3:
                         state.status = "failed"
                         state.termination_reason = "loop_detected"
                         state.last_error = "same tool calls repeated for 3 consecutive steps"
+                        self._finish_tracking(state, tracker)
                         self._checkpoint(state, checkpoint)
                         return state
                     continue
 
+                if tracker is not None:
+                    tracker.record_step(
+                        step,
+                        response,
+                        latency_seconds=model_latency,
+                        first_token_latency_seconds=(
+                            first_token_at - model_started if first_token_at is not None else None
+                        ),
+                        tools=[],
+                    )
                 if response.content:
                     state.final_answer = response.content
                     state.status = "completed"
                     state.termination_reason = "completed"
+                    self._finish_tracking(state, tracker)
                     self._checkpoint(state, checkpoint)
                     return state
 
                 state.status = "failed"
                 state.termination_reason = "empty_model_response"
                 state.last_error = "model returned neither text nor tool calls"
+                self._finish_tracking(state, tracker)
                 self._checkpoint(state, checkpoint)
                 return state
 
             state.status = "failed"
             state.termination_reason = "max_steps"
             state.last_error = f"maximum step limit reached: {self.max_steps}"
+            self._finish_tracking(state, tracker)
             self._checkpoint(state, checkpoint)
             return state
         except asyncio.CancelledError:
             state.status = "failed"
             state.termination_reason = "cancelled"
             state.last_error = "run cancelled by user"
+            if tracker is not None:
+                tracker.synthesize_pending_results("tool call cancelled by user")
+                self._finish_tracking(state, tracker, status="cancelled")
+            self._checkpoint(state, checkpoint)
+            raise
+        except Exception as exc:
+            state.status = "failed"
+            state.termination_reason = "runtime_error"
+            state.last_error = str(exc)
+            if tracker is not None:
+                tracker.synthesize_pending_results(f"tool call interrupted: {exc}")
+                self._finish_tracking(state, tracker, error=str(exc))
             self._checkpoint(state, checkpoint)
             raise
 
@@ -212,6 +292,24 @@ class AgentRuntime:
     ) -> None:
         if checkpoint is not None:
             checkpoint(state)
+
+    @staticmethod
+    def _finish_tracking(
+        state: SessionState,
+        tracker: RunTracker | None,
+        *,
+        status: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        if tracker is None:
+            return
+        summary = tracker.finish(state, status=status, error=error)
+        state.last_run_input_tokens = summary.input_tokens
+        state.last_run_output_tokens = summary.output_tokens
+        state.last_run_cost = summary.cost
+        state.last_run_currency = summary.currency
+        state.last_run_latency = summary.latency_seconds
+        state.last_trace_path = summary.trace_path
 
     def _tool_limit_result(self) -> ToolResult:
         return ToolResult(

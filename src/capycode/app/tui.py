@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import ClassVar
 
@@ -21,10 +22,11 @@ from textual.widgets import (
 )
 from textual.widgets.option_list import Option
 
-from capycode.config.loader import DEFAULT_MODELS_PATH, load_models
-from capycode.config.user_settings import UserModelSettings, UserSettingsStore
+from capycode.config.loader import DEFAULT_MODELS_PATH
+from capycode.config.user_settings import UserEndpointSettings, UserSettingsStore
 from capycode.core import RuntimeObserver, SessionState, SessionStore, SessionSummary
 from capycode.tools import ToolResult
+from capycode.trace import RunCatalog
 
 from .runtime import discover_models, execute_task
 
@@ -32,7 +34,7 @@ TaskRunner = Callable[
     [
         str,
         Path,
-        str,
+        str | None,
         Path,
         int,
         UserSettingsStore | None,
@@ -57,10 +59,12 @@ COMMANDS = (
     SlashCommand("/config", "/config", "配置当前模型和本地凭据"),
     SlashCommand("/models", "/models", "列出服务端返回的可用模型"),
     SlashCommand("/model", "/model [model-id]", "打开模型选择器或直接切换"),
+    SlashCommand("/pricing", "/pricing", "配置当前真实模型的价格和上下文窗口"),
     SlashCommand("/workspace", "/workspace [path]", "查看或切换工作区"),
     SlashCommand("/resume", "/resume [会话 ID]", "选择并恢复当前工作区的会话"),
     SlashCommand("/continue", "/continue", "继续当前工作区最近的会话"),
     SlashCommand("/sessions", "/sessions", "列出当前工作区的历史会话"),
+    SlashCommand("/runs", "/runs", "列出当前工作区最近的运行记录"),
     SlashCommand("/new", "/new", "开始一个新会话"),
     SlashCommand("/status", "/status", "显示当前会话状态"),
     SlashCommand("/clear", "/clear", "清空会话显示"),
@@ -262,30 +266,29 @@ class ModelConfigScreen(ModalScreen[bool]):
 
     def __init__(
         self,
-        alias: str,
         store: UserSettingsStore,
         model_fetcher: ModelFetcher,
     ) -> None:
         super().__init__()
-        self.alias = alias
         self.store = store
         self.model_fetcher = model_fetcher
-        local = self.store.load().models.get(self.alias)
-        self.available_models = list(local.available_models) if local else []
+        endpoint = self.store.load().endpoint
+        self.available_models = list(endpoint.available_models) if endpoint else []
 
     def compose(self) -> ComposeResult:
-        local = self.store.load().models.get(self.alias)
+        settings = self.store.load()
+        endpoint = settings.endpoint
         with Vertical(id="config-dialog"):
             yield Label("配置模型服务", id="config-title")
             yield Label("Base URL")
             yield Input(
-                value=local.base_url if local else "",
+                value=endpoint.base_url if endpoint else "",
                 placeholder="https://example.com/v1",
                 id="config-base-url",
             )
             yield Label("API Key（仅保存在本机用户目录）")
             yield Input(
-                value=local.api_key if local else "",
+                value=endpoint.api_key if endpoint else "",
                 placeholder="输入 API Key",
                 password=True,
                 id="config-api-key",
@@ -296,7 +299,7 @@ class ModelConfigScreen(ModalScreen[bool]):
             initial_options = [(model, model) for model in self.available_models]
             yield Select[str](
                 initial_options,
-                value=local.model if local else Select.NULL,
+                value=settings.default_model or Select.NULL,
                 prompt="请先获取模型列表",
                 allow_blank=True,
                 id="config-model",
@@ -325,8 +328,7 @@ class ModelConfigScreen(ModalScreen[bool]):
             )
             return
         try:
-            self.store.configure_model(
-                self.alias,
+            self.store.configure_endpoint(
                 model=str(selected_model),
                 base_url=base_url,
                 api_key=api_key,
@@ -368,6 +370,92 @@ class ModelConfigScreen(ModalScreen[bool]):
         finally:
             button.disabled = False
             button.label = "重新获取模型"
+
+
+class PricingConfigScreen(ModalScreen[bool]):
+    CSS = """
+    PricingConfigScreen {
+        align: center middle;
+        background: $background 70%;
+    }
+
+    #pricing-dialog {
+        width: 72;
+        height: auto;
+        border: round $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #pricing-dialog Input {
+        margin-bottom: 1;
+    }
+
+    #pricing-title {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    #pricing-actions {
+        align-horizontal: right;
+        height: auto;
+    }
+
+    #pricing-error {
+        color: $error;
+        height: auto;
+    }
+    """
+
+    def __init__(self, model_id: str, store: UserSettingsStore) -> None:
+        super().__init__()
+        self.model_id = model_id
+        self.store = store
+
+    def compose(self) -> ComposeResult:
+        metadata = self.store.load().models[self.model_id]
+        pricing = metadata.pricing
+        with Vertical(id="pricing-dialog"):
+            yield Label(f"模型费用 · {self.model_id}", id="pricing-title")
+            yield Label("输入价格（每 100 万 Token）")
+            yield Input(value=str(pricing.input_per_million), id="pricing-input")
+            yield Label("输出价格（每 100 万 Token）")
+            yield Input(value=str(pricing.output_per_million), id="pricing-output")
+            yield Label("币种（例如 CNY、USD）")
+            yield Input(value=pricing.currency, id="pricing-currency")
+            yield Label("上下文窗口 Token 数")
+            yield Input(value=str(metadata.context_window), id="pricing-context")
+            yield Label("价格日期（YYYY-MM-DD）")
+            yield Input(value=pricing.snapshot_date.isoformat(), id="pricing-date")
+            yield Static("", id="pricing-error")
+            with Horizontal(id="pricing-actions"):
+                yield Button("取消", id="pricing-cancel")
+                yield Button("保存", variant="primary", id="pricing-save")
+
+    @on(Button.Pressed, "#pricing-cancel")
+    def cancel(self) -> None:
+        self.dismiss(False)
+
+    @on(Button.Pressed, "#pricing-save")
+    def save(self) -> None:
+        try:
+            input_price = float(self.query_one("#pricing-input", Input).value)
+            output_price = float(self.query_one("#pricing-output", Input).value)
+            context_window = int(self.query_one("#pricing-context", Input).value)
+            currency = self.query_one("#pricing-currency", Input).value.strip()
+            snapshot_date = date.fromisoformat(self.query_one("#pricing-date", Input).value)
+            self.store.configure_pricing(
+                self.model_id,
+                input_per_million=input_price,
+                output_per_million=output_price,
+                currency=currency,
+                snapshot_date=snapshot_date,
+                context_window=context_window,
+            )
+        except (OSError, ValueError) as exc:
+            self.query_one("#pricing-error", Static).update(str(exc))
+            return
+        self.dismiss(True)
 
 
 class ModelPickerScreen(ModalScreen[str | None]):
@@ -614,7 +702,7 @@ class CapyCodeApp(App[None]):
         self,
         *,
         workspace: Path | None = None,
-        model_alias: str | None = None,
+        model_id: str | None = None,
         models_path: Path = DEFAULT_MODELS_PATH,
         max_steps: int = 10,
         settings_store: UserSettingsStore | None = None,
@@ -632,9 +720,7 @@ class CapyCodeApp(App[None]):
             self.settings_store.path.parent / "sessions"
         )
         settings = self.settings_store.load()
-        self.model_alias = model_alias or settings.default_model
-        configured = settings.models.get(self.model_alias)
-        self.model_id = configured.model if configured else None
+        self.model_id = model_id or settings.default_model
         self.task_runner = task_runner
         self.model_fetcher = model_fetcher
         self.initial_resume = initial_resume
@@ -813,10 +899,14 @@ class CapyCodeApp(App[None]):
             await self._show_models()
         elif command == "/model":
             await self._select_model(argument)
+        elif command == "/pricing":
+            self._open_pricing()
         elif command == "/workspace":
             self._select_workspace(argument)
         elif command == "/sessions":
             self._show_sessions()
+        elif command == "/runs":
+            self._show_runs()
         elif command == "/resume":
             self._resume_session(argument)
         elif command == "/continue":
@@ -833,7 +923,7 @@ class CapyCodeApp(App[None]):
         if configured is None:
             return
         lines = [
-            f"{'●' if model == configured.model else ' '} {model}"
+            f"{'●' if model == self.model_id else ' '} {model}"
             for model in configured.available_models
         ]
         self._write_system("可用模型：\n" + "\n".join(lines))
@@ -844,15 +934,16 @@ class CapyCodeApp(App[None]):
             if configured is None:
                 return
             self.push_screen(
-                ModelPickerScreen(configured.available_models, configured.model),
+                ModelPickerScreen(configured.available_models, self.model_id or ""),
                 self._model_picker_closed,
             )
             return
         self._apply_model_selection(model_id)
 
-    async def _refresh_models(self) -> UserModelSettings | None:
+    async def _refresh_models(self) -> UserEndpointSettings | None:
         try:
-            configured = self.settings_store.load().models.get(self.model_alias)
+            settings = self.settings_store.load()
+            configured = settings.endpoint
         except (OSError, ValueError) as exc:
             self._write_error(str(exc))
             return None
@@ -863,9 +954,8 @@ class CapyCodeApp(App[None]):
         self._write_system("正在刷新服务端模型列表…")
         try:
             models = await self.model_fetcher(configured.base_url, configured.api_key)
-            selected = configured.model if configured.model in models else models[0]
-            settings = self.settings_store.configure_model(
-                self.model_alias,
+            selected = self.model_id if self.model_id in models else models[0]
+            settings = self.settings_store.configure_endpoint(
                 model=selected,
                 base_url=configured.base_url,
                 api_key=configured.api_key,
@@ -873,7 +963,7 @@ class CapyCodeApp(App[None]):
             )
             self.model_id = selected
             self._refresh_status()
-            return settings.models[self.model_alias]
+            return settings.endpoint
         except Exception as exc:
             self._write_error(f"刷新模型列表失败，使用本地缓存：{exc}")
             return configured
@@ -884,7 +974,7 @@ class CapyCodeApp(App[None]):
 
     def _apply_model_selection(self, model_id: str) -> None:
         try:
-            self.settings_store.select_model(self.model_alias, model_id)
+            self.settings_store.select_model(model_id)
         except (OSError, ValueError) as exc:
             self._write_error(str(exc))
             return
@@ -922,6 +1012,20 @@ class CapyCodeApp(App[None]):
             for item in sessions
         ]
         self._write_system("当前工作区的会话：\n" + "\n".join(lines))
+
+    def _show_runs(self) -> None:
+        summaries = RunCatalog(self.workspace).list()[:10]
+        if not summaries:
+            self._write_system("当前工作区还没有运行记录。")
+            return
+        lines = [
+            (
+                f"{item.run_id[:8]}  {item.status:<9}  {item.model_id}  "
+                f"{item.steps} steps  {item.latency_seconds:.2f}s"
+            )
+            for item in summaries
+        ]
+        self._write_system("最近运行：\n" + "\n".join(lines))
 
     def _resume_session(self, value: str) -> None:
         if self.busy:
@@ -972,17 +1076,8 @@ class CapyCodeApp(App[None]):
         self._refresh_status()
 
     def _open_config(self) -> None:
-        try:
-            registry = load_models(self.models_path)
-        except (OSError, ValueError) as exc:
-            self._write_error(str(exc))
-            return
-        if self.model_alias not in registry.models:
-            self._write_error(f"模型别名不存在：{self.model_alias}")
-            return
         self.push_screen(
             ModelConfigScreen(
-                self.model_alias,
                 self.settings_store,
                 self.model_fetcher,
             ),
@@ -991,10 +1086,26 @@ class CapyCodeApp(App[None]):
 
     def _config_closed(self, saved: bool | None) -> None:
         if saved:
-            configured = self.settings_store.load().models[self.model_alias]
-            self.model_id = configured.model
+            self.model_id = self.settings_store.load().default_model
             self._write_system(f"模型配置已保存到 {self.settings_store.path}")
             self._refresh_status()
+
+    def _open_pricing(self) -> None:
+        if self.model_id is None:
+            self._write_error("尚未选择真实模型。请先运行 /config。")
+            return
+        self.push_screen(
+            PricingConfigScreen(self.model_id, self.settings_store),
+            self._pricing_closed,
+        )
+
+    def _pricing_closed(self, saved: bool | None) -> None:
+        if saved and self.model_id is not None:
+            pricing = self.settings_store.load().models[self.model_id].pricing
+            self._write_system(
+                f"已保存 {self.model_id} 的费用：输入 {pricing.input_per_million:g} / "
+                f"输出 {pricing.output_per_million:g} {pricing.currency} / 1M tokens"
+            )
 
     @work(exclusive=True)
     async def run_task(self, task: str) -> None:
@@ -1007,7 +1118,7 @@ class CapyCodeApp(App[None]):
             state = await self.task_runner(
                 task,
                 self.workspace,
-                self.model_alias,
+                self.model_id,
                 self.models_path,
                 self.max_steps,
                 self.settings_store,
@@ -1018,6 +1129,14 @@ class CapyCodeApp(App[None]):
             self.last_session = state
             if state.final_answer and not self.received_stream_delta:
                 self._write_assistant(state.final_answer)
+            if state.current_run_id:
+                tokens = state.last_run_input_tokens + state.last_run_output_tokens
+                self._write_system(
+                    f"run: {state.current_run_id[:8]} · {state.step} steps · "
+                    f"{tokens} tokens · cost {state.last_run_cost:.6f} "
+                    f"{state.last_run_currency} · "
+                    f"{state.last_run_latency:.2f}s"
+                )
             if state.status != "completed":
                 self._write_error(state.last_error or f"任务结束：{state.status}")
         except Exception as exc:
@@ -1031,7 +1150,7 @@ class CapyCodeApp(App[None]):
 
     def _checkpoint_session(self, state: SessionState) -> None:
         self.last_session = state
-        self.session_store.save(state, model_alias=self.model_alias)
+        self.session_store.save(state, model_id=self.model_id or state.current_model or "unknown")
 
     async def on_model_start(self, step: int) -> None:
         self.streaming_message = None
@@ -1112,9 +1231,14 @@ class CapyCodeApp(App[None]):
     def _status_text(self) -> str:
         state = "运行中" if self.busy else "就绪"
         session = self.last_session.session_id[:8] if self.last_session else "new"
+        run_id = (
+            self.last_session.current_run_id[:8]
+            if self.last_session and self.last_session.current_run_id
+            else "-"
+        )
         return (
             f"{state}  ·  model: {self.model_id or '未配置'}  ·  session: {session}"
-            f"  ·  workspace: {self.workspace}"
+            f"  ·  run: {run_id}  ·  workspace: {self.workspace}"
         )
 
     def _refresh_status(self) -> None:
@@ -1131,13 +1255,13 @@ class CapyCodeApp(App[None]):
 def launch_tui(
     *,
     workspace: Path | None = None,
-    model_alias: str | None = None,
+    model_id: str | None = None,
     models_path: Path = DEFAULT_MODELS_PATH,
     initial_resume: str | None = None,
 ) -> None:
     CapyCodeApp(
         workspace=workspace,
-        model_alias=model_alias,
+        model_id=model_id,
         models_path=models_path,
         initial_resume=initial_resume,
     ).run()

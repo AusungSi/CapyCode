@@ -9,6 +9,7 @@ from pathlib import Path
 from capycode import __version__
 from capycode.config.loader import DEFAULT_MODELS_PATH, load_configuration
 from capycode.llm import LLMError
+from capycode.trace import RunCatalog, RunSummary
 
 from .runtime import execute_task
 from .tui import launch_tui
@@ -46,17 +47,25 @@ def build_parser() -> argparse.ArgumentParser:
     run = subparsers.add_parser("run", help="run the P0 runtime against a workspace")
     run.add_argument("task", help="natural-language repository task")
     run.add_argument("--workspace", type=Path, default=Path.cwd())
-    run.add_argument("--model", default="small", help="model alias from models.yaml")
+    run.add_argument("--model", default=None, help="real model ID returned by the endpoint")
     run.add_argument("--models", type=Path, default=DEFAULT_MODELS_PATH)
     run.add_argument("--max-steps", type=int, default=10)
 
     tui = subparsers.add_parser("tui", help="open the interactive terminal interface")
     tui.add_argument("--workspace", type=Path, default=Path.cwd())
-    tui.add_argument("--model", default=None, help="initial model alias")
+    tui.add_argument("--model", default=None, help="initial real model ID")
     tui.add_argument("--models", type=Path, default=DEFAULT_MODELS_PATH)
     tui_resume_group = tui.add_mutually_exclusive_group()
     tui_resume_group.add_argument("--continue", dest="continue_session", action="store_true")
     tui_resume_group.add_argument("--resume", metavar="SESSION_ID")
+
+    runs = subparsers.add_parser("runs", help="list recent runs for a workspace")
+    runs.add_argument("--workspace", type=Path, default=Path.cwd())
+    runs.add_argument("--limit", type=int, default=20)
+
+    inspect_run = subparsers.add_parser("inspect-run", help="inspect one local run summary")
+    inspect_run.add_argument("run_id", help="full or unique run ID prefix, or latest")
+    inspect_run.add_argument("--workspace", type=Path, default=Path.cwd())
     return parser
 
 
@@ -76,7 +85,7 @@ def show_welcome(workspace: Path | None = None) -> int:
     print(f"workspace: {current_workspace}")
     print("stage: P0-1 interactive runtime")
     print("\nAvailable now:")
-    print('  capycode run "<task>" --workspace <path> --model <alias>')
+    print('  capycode run "<task>" --workspace <path> --model <model-id>')
     print("  capycode doctor --models <models.yaml> --profiles <profiles.yaml>")
     print("  capycode --help")
     print("\nRun capycode without arguments to open the interactive terminal interface.")
@@ -89,11 +98,11 @@ def run_doctor(models_path: Path, profiles_path: Path, *, strict_secrets: bool) 
     print(f"profiles: {len(bundle.profiles.profiles)} ({profiles_path})")
 
     missing: list[str] = []
-    for alias, model in sorted(bundle.models.models.items()):
+    for model_id, model in sorted(bundle.models.models.items()):
         base_url_ready = bool(os.getenv(model.base_url_env))
         api_key_ready = bool(os.getenv(model.api_key_env))
         print(
-            f"- {alias}: provider={model.provider} model={model.model} "
+            f"- {model_id}: provider={model.provider} model={model.model} "
             f"base_url={'ready' if base_url_ready else 'missing'} "
             f"api_key={'ready' if api_key_ready else 'missing'}"
         )
@@ -114,22 +123,71 @@ def run_doctor(models_path: Path, profiles_path: Path, *, strict_secrets: bool) 
 async def run_agent(
     task: str,
     workspace: Path,
-    model_alias: str,
+    model_id: str | None,
     models_path: Path,
     *,
     max_steps: int,
 ) -> int:
-    state = await execute_task(task, workspace, model_alias, models_path, max_steps)
+    state = await execute_task(task, workspace, model_id, models_path, max_steps)
 
     if state.final_answer:
         print(state.final_answer)
     print(f"session_id: {state.session_id}")
     print(f"status: {state.status}")
     print(f"steps: {state.step}")
+    if state.current_run_id:
+        print(f"run_id: {state.current_run_id}")
+    if state.last_trace_path:
+        print(f"trace: {state.last_trace_path}")
     print(f"relevant_files: {', '.join(state.relevant_files) or '-'}")
     if state.last_error:
         print(f"error: {state.last_error}")
     return 0 if state.status == "completed" else 1
+
+
+def format_run_summary(summary: RunSummary) -> str:
+    return "\n".join(
+        [
+            f"run_id: {summary.run_id}",
+            f"session_id: {summary.session_id}",
+            f"status: {summary.status}",
+            f"termination: {summary.termination_reason}",
+            f"model: {summary.model_id} ({summary.provider})",
+            f"steps: {summary.steps}",
+            f"tokens: {summary.input_tokens} input, {summary.output_tokens} output",
+            f"cost: {summary.cost:.6f} {summary.currency}",
+            f"latency: {summary.latency_seconds:.3f}s",
+            (
+                "tools: "
+                f"{summary.tool_requests} requested, {summary.tool_successes} succeeded, "
+                f"{summary.tool_failures} failed"
+            ),
+            f"tests_passed: {summary.tests_passed}",
+            f"modified_files: {', '.join(summary.modified_files) or '-'}",
+            f"trace: {summary.trace_path}",
+        ]
+    )
+
+
+def show_runs(workspace: Path, *, limit: int) -> int:
+    if limit <= 0:
+        raise ValueError("limit must be positive")
+    summaries = RunCatalog(workspace).list()[:limit]
+    if not summaries:
+        print("No runs found for this workspace.")
+        return 0
+    for summary in summaries:
+        finished = summary.finished_at.astimezone().strftime("%m-%d %H:%M")
+        print(
+            f"{summary.run_id[:8]}  {summary.status:<9}  {finished}  "
+            f"{summary.model_id}  {summary.steps} steps  {summary.latency_seconds:.2f}s"
+        )
+    return 0
+
+
+def inspect_run(workspace: Path, run_id: str) -> int:
+    print(format_run_summary(RunCatalog(workspace).resolve(run_id)))
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -158,11 +216,15 @@ def main(argv: Sequence[str] | None = None) -> None:
         elif args.command == "tui":
             launch_tui(
                 workspace=args.workspace,
-                model_alias=args.model,
+                model_id=args.model,
                 models_path=args.models,
                 initial_resume=args.resume or ("latest" if args.continue_session else None),
             )
             code = 0
+        elif args.command == "runs":
+            code = show_runs(args.workspace, limit=args.limit)
+        elif args.command == "inspect-run":
+            code = inspect_run(args.workspace, args.run_id)
         else:
             parser.error(f"unsupported command: {args.command}")
             return

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -31,7 +33,7 @@ def test_session_store_round_trip_and_workspace_filter(tmp_path: Path) -> None:
     store = SessionStore(root)
     state = make_state(workspace)
 
-    saved = store.save(state, model_alias="small")
+    saved = store.save(state, model_id="demo-model")
 
     assert saved.title == "Inspect the project"
     assert store.list(workspace)[0].session_id == state.session_id
@@ -50,7 +52,7 @@ def test_session_store_rejects_cross_workspace_resume(tmp_path: Path) -> None:
     other_workspace.mkdir()
     store = SessionStore(tmp_path / "sessions")
     state = make_state(workspace)
-    store.save(state, model_alias="small")
+    store.save(state, model_id="demo-model")
 
     with pytest.raises(ValueError, match="different workspace"):
         store.load(state.session_id, other_workspace)
@@ -65,6 +67,37 @@ def test_session_list_ignores_corrupt_records(tmp_path: Path) -> None:
     (corrupt / "session.json").write_text("not json", encoding="utf-8")
 
     assert SessionStore(root).list(workspace) == []
+
+
+def test_legacy_session_alias_migrates_from_actual_state_model(tmp_path: Path) -> None:
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    root = tmp_path / "sessions"
+    state = make_state(workspace)
+    state.current_model = "real-model-id"
+    directory = root / state.session_id
+    directory.mkdir(parents=True)
+    now = datetime.now(UTC).isoformat()
+    (directory / "session.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "session_id": state.session_id,
+                "workspace": str(workspace),
+                "model_alias": "small",
+                "title": "Legacy",
+                "created_at": now,
+                "updated_at": now,
+                "state": state.model_dump(mode="json"),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    record = SessionStore(root).load(state.session_id, workspace)
+
+    assert record.version == 2
+    assert record.model_id == "real-model-id"
 
 
 def test_recover_history_removes_incomplete_tool_groups() -> None:

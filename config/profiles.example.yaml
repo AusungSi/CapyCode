@@ -1,7 +1,7 @@
 profiles:
   retrieval_fast:
     capability: repository_retrieval
-    model: small
+    model: model-a
     instruction: prompts/retrieval.md
     tools: [list_files, search_code, read_file]
     context_policy: retrieval
@@ -9,9 +9,9 @@ profiles:
       max_output_tokens: 2048
       max_steps: 3
 
-  diagnosis_strong:
+  diagnosis_deep:
     capability: failure_diagnosis
-    model: strong
+    model: model-c
     instruction: prompts/diagnosis.md
     tools: [read_file, search_code, run_command]
     context_policy: diagnosis
