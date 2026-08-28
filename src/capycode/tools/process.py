@@ -71,21 +71,23 @@ class CommandRunner:
                 stderr=asyncio.subprocess.PIPE,
             )
             timed_out = False
+            stdout_task = asyncio.create_task(self._read_stream(process.stdout))
+            stderr_task = asyncio.create_task(self._read_stream(process.stderr))
             try:
-                stdout_raw, stderr_raw = await asyncio.wait_for(
-                    process.communicate(), timeout=timeout_seconds
-                )
+                await asyncio.wait_for(process.wait(), timeout=timeout_seconds)
             except TimeoutError:
                 timed_out = True
                 process.kill()
-                stdout_raw, stderr_raw = await process.communicate()
+                await process.wait()
             except asyncio.CancelledError:
                 process.kill()
-                await process.communicate()
+                await process.wait()
+                stdout_task.cancel()
+                stderr_task.cancel()
                 raise
+            stdout, stdout_truncated = await stdout_task
+            stderr, stderr_truncated = await stderr_task
 
-        stdout, stdout_truncated = self._limit_stream(stdout_raw.decode("utf-8", errors="replace"))
-        stderr, stderr_truncated = self._limit_stream(stderr_raw.decode("utf-8", errors="replace"))
         return ProcessResult(
             argv=tuple(argv),
             cwd=working_directory,
@@ -156,11 +158,30 @@ class CommandRunner:
         environment["PYTHONIOENCODING"] = "utf-8"
         return environment
 
-    def _limit_stream(self, content: str) -> tuple[str, bool]:
-        if len(content) <= self.max_stream_characters:
-            return content, False
-        marker = "\n... output truncated ...\n"
-        available = self.max_stream_characters - len(marker)
-        head = available // 2
-        tail = available - head
-        return content[:head] + marker + content[-tail:], True
+    async def _read_stream(self, reader: asyncio.StreamReader | None) -> tuple[str, bool]:
+        if reader is None:
+            return "", False
+        marker = b"\n... output truncated ...\n"
+        byte_limit = self.max_stream_characters
+        available = byte_limit - len(marker)
+        head_limit = available // 2
+        tail_limit = available - head_limit
+        complete = bytearray()
+        head = bytearray()
+        tail = bytearray()
+        truncated = False
+        while chunk := await reader.read(8_192):
+            if not truncated:
+                complete.extend(chunk)
+                if len(complete) <= byte_limit:
+                    continue
+                truncated = True
+                head.extend(complete[:head_limit])
+                tail.extend(complete[-tail_limit:])
+                complete.clear()
+            else:
+                tail.extend(chunk)
+                if len(tail) > tail_limit:
+                    del tail[:-tail_limit]
+        raw = bytes(head + marker + tail) if truncated else bytes(complete)
+        return raw.decode("utf-8", errors="replace"), truncated

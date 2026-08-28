@@ -23,6 +23,10 @@ async def test_list_files_filters_and_ignores_generated_directories(tmp_path: Pa
     assert result.content == "src/app.py"
     assert result.data["count"] == 1
 
+    excluded = await executor.execute("list_files", {"path": ".git"})
+    assert excluded.status == "error"
+    assert "excluded" in excluded.content
+
 
 @pytest.mark.asyncio
 async def test_search_code_returns_lines_without_marking_files_as_read(tmp_path: Path) -> None:

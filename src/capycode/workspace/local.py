@@ -130,24 +130,28 @@ class LocalWorkspace:
         if max_results <= 0:
             raise ValueError("max_results must be positive")
         directory = self.resolve_directory(relative_path)
+        directory_parts = directory.relative_to(self.root).parts
+        if any(part in self.DEFAULT_IGNORED_DIRECTORIES for part in directory_parts):
+            raise WorkspaceError(f"directory is excluded from discovery: {relative_path}")
         matches: list[str] = []
-        candidates = sorted(directory.rglob("*"), key=lambda path: path.as_posix())
-        for candidate in candidates:
-            relative_candidate = candidate.relative_to(self.root)
-            if any(part in self.DEFAULT_IGNORED_DIRECTORIES for part in relative_candidate.parts):
-                continue
-            try:
-                resolved = candidate.resolve(strict=True)
-            except (FileNotFoundError, OSError):
-                continue
-            if not resolved.is_relative_to(self.root) or not resolved.is_file():
-                continue
-            relative = resolved.relative_to(self.root).as_posix()
-            if not PurePath(relative).match(pattern):
-                continue
-            matches.append(relative)
-            if len(matches) >= max_results:
-                break
+        for current, directories, filenames in os.walk(directory, followlinks=False):
+            directories[:] = sorted(
+                name for name in directories if name not in self.DEFAULT_IGNORED_DIRECTORIES
+            )
+            for filename in sorted(filenames):
+                candidate = Path(current) / filename
+                try:
+                    resolved = candidate.resolve(strict=True)
+                except (FileNotFoundError, OSError):
+                    continue
+                if not resolved.is_relative_to(self.root) or not resolved.is_file():
+                    continue
+                relative = resolved.relative_to(self.root).as_posix()
+                if not PurePath(relative).match(pattern):
+                    continue
+                matches.append(relative)
+                if len(matches) >= max_results:
+                    return sorted(set(matches))
         return sorted(set(matches))
 
     def require_fresh_read(self, relative_path: str) -> FileReadRecord:
@@ -230,9 +234,14 @@ class LocalWorkspace:
                 f"file exceeds read limit: {size} bytes > {self.max_read_bytes} bytes"
             )
         try:
-            return path.read_bytes()
+            raw = path.read_bytes()
         except OSError as exc:
             raise WorkspaceError(f"unable to read file: {display_path}: {exc}") from exc
+        if len(raw) > self.max_read_bytes:
+            raise WorkspaceError(
+                f"file exceeds read limit: {len(raw)} bytes > {self.max_read_bytes} bytes"
+            )
+        return raw
 
     def _record_read(
         self,

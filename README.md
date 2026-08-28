@@ -4,19 +4,21 @@
 
 ## 当前阶段
 
-当前开发阶段为 **P0-1 Runtime Skeleton**。P0-0 工程骨架已经完成；本阶段新增：
+当前开发阶段为 **P0-2 Workspace Tool Loop**。P0-0 工程骨架与 P0-1 流式运行时已经完成；当前 Baseline 包含：
 
 - 统一 LLM Request/Response/Tool Call 类型
 - OpenAI-compatible Chat Completions 适配器
 - `SessionState` 与最小 Agent Loop
-- 受 Workspace 边界保护的 `read_file`
+- 受 Workspace 边界保护的完整文件与命令工具链
 - FakeLLM 确定性双轮闭环
 - Textual 全屏终端界面和 Slash Command
 - 用户目录下的本地模型与凭据配置
 - OpenAI-compatible SSE 流式输出和增量工具调用组装
 - 用户、Agent、工具与系统状态分层消息视图
+- 读后再写、过期读取检测、原子替换与换行格式保持
+- 受控测试执行、只读 Git diff、循环检测与工具调用数量限制
 
-完整 Coding Tool Loop 和 Trace 将在后续独立模块中实现。
+Trace、Context Snapshot 和 Anthropic 原生协议将在后续独立模块中实现。
 
 ## 本地安装
 
@@ -48,7 +50,7 @@ capycode
 
 Slash Command 菜单支持方向键移动、Tab 补全和 Esc 关闭；普通输入支持方向键查找本次会话的历史任务。`/model` 打开独立模型选择面板，方向键选择、Enter 确认、Esc 取消。
 
-模型请求采用真实 SSE 流式传输：首个 Token 返回前显示轻量思考动画，开始输出后原位更新同一个 Markdown 消息；工具调用显示进行中、成功或失败状态。主界面移除了占用空间的欢迎横幅和 Footer，将终端高度优先留给会话内容。
+模型请求采用真实 SSE 流式传输：首个 Token 返回前显示轻量思考动画，开始输出后原位更新同一个 Markdown 消息；工具调用显示进行中、成功或失败状态。启动时显示短暂的 CapyCode 封面，进入会话后使用紧凑状态栏，将终端高度优先留给会话内容。
 
 `/config` 会按照 OpenAI-compatible 协议请求 `<Base URL>/models`。CapyCode 会保存服务端返回的完整模型列表以及当前选择；界面和状态栏只显示真实模型 ID，不显示内部路由别名。直接执行 `/model` 可使用方向键选择模型，Enter 确认，Esc 取消。本地配置保存在 `~/.capycode/settings.json`，不会写入项目仓库；模型环境变量仍作为无本地配置时的兼容回退。项目名 **CapyCode** 来自 Capability + Code，并与源码包 `capycode`、运行产物目录 `.capy` 保持一致。
 
@@ -57,6 +59,21 @@ Linux/WSL：
 ```bash
 uv sync --extra dev
 ```
+
+## Workspace 工具与安全约束
+
+模型当前可以调用：
+
+- `list_files`、`search_code`、`read_file`
+- `write_file`、`replace_text`
+- `run_command`、`run_tests`
+- `git_diff`
+
+所有文件路径都必须位于当前工作区。绝对路径、UNC 网络路径、路径穿越和越界符号链接会被拒绝；`.git`、`.venv`、`node_modules` 等生成目录不会进入文件发现结果。
+
+修改已有文件前必须先完整调用 `read_file`。CapyCode 会记录内容摘要、修改时间、文件大小、编码和换行格式；如果文件在读取后被外部程序改动，写入会被拒绝并要求重新读取。写入使用同目录临时文件和原子替换，已有 UTF-8 BOM、LF、CRLF 或 CR 风格会被保留。
+
+命令工具只接受 `argv` 数组，不调用二级 Shell。默认允许 `python`、`python3`、`py`、`uv`、`pytest` 和 `rg`；普通命令不能执行 Git，Git 仅通过只读 `git_diff` 开放。命令工作目录和显式路径参数必须留在工作区内，敏感环境变量不会传入子进程，超时进程会被终止，stdout 与 stderr 使用有界首尾保留。
 
 ## 骨架验收
 

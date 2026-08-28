@@ -141,7 +141,9 @@ async def test_command_timeout_terminates_process(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_command_output_preserves_head_and_tail(tmp_path: Path) -> None:
-    (tmp_path / "output.py").write_text("print('A' * 300 + 'B' * 300)\n", encoding="utf-8")
+    (tmp_path / "output.py").write_text(
+        "print('A' * 1_000_000 + 'B' * 1_000_000)\n", encoding="utf-8"
+    )
     runner = CommandRunner(max_stream_characters=128)
     executor = ToolExecutor(ToolRegistry([RunCommandTool(runner)]), LocalWorkspace(tmp_path))
 
