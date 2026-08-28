@@ -65,12 +65,12 @@ capycode inspect-run <run ID 或唯一前缀>
 - `/workspace [path]`：查看和切换工作区
 - `/resume [会话 ID]`、`/continue`：选择历史会话或继续最近会话
 - `/sessions`、`/new`：列出历史会话或开始新会话
-- `/runs`：列出当前工作区最近的运行记录
+- `/runs`：用键盘选择运行记录，并查看步骤、工具、Token、费用和最终 diff
 - `/status`、`/clear`、`/quit`：会话控制
 
 Slash Command 菜单支持方向键移动、Tab 补全和 Esc 关闭；普通输入支持方向键查找本次会话的历史任务。`/model` 打开独立模型选择面板，方向键选择、Enter 确认、Esc 取消。
 
-模型请求采用真实 SSE 流式传输：首个 Token 返回前显示轻量思考动画，开始输出后原位更新同一个 Markdown 消息；工具调用显示进行中、成功或失败状态。启动时显示短暂的 CapyCode 封面，进入会话后使用紧凑状态栏，将终端高度优先留给会话内容。
+模型请求采用真实 SSE 流式传输：首个 Token 返回前显示轻量思考动画，开始输出后原位更新同一个 Markdown 消息；工具调用显示进行中、成功或失败状态，并可用鼠标、Enter 或空格展开参数、耗时、退出码和有界输出。启动时显示短暂的 CapyCode 封面，进入会话后使用随终端宽度折叠的状态栏，实时展示 Run、Token、费用和耗时。Ctrl+C 会先取消当前任务、补全 Trace 并恢复输入焦点，再次 Ctrl+C 可退出。
 
 `/config` 会按照 OpenAI-compatible 协议请求 `<Base URL>/models`。CapyCode 直接使用并保存服务端返回的真实模型 ID，不再建立 `small`、`medium`、`strong` 等人工分级。直接执行 `/model` 可使用方向键切换真实模型；`/pricing` 为当前模型独立保存每百万 Token 输入/输出价格、币种、价格日期和上下文窗口。后续能力等级由 P1/P2 的能力测试与 Profile 生成，不根据模型名称猜测。本地配置保存在 `~/.capycode/settings.json`，不会写入项目仓库；旧版别名配置在首次读取时自动迁移。项目名 **CapyCode** 来自 Capability + Code，并与源码包 `capycode`、运行产物目录 `.capy` 保持一致。
 

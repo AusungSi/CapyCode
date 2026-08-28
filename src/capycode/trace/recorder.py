@@ -39,7 +39,7 @@ class TraceRecorder:
     def pending_tool_call_ids(self) -> frozenset[str]:
         return frozenset(self._pending_tools - self._result_tools)
 
-    def append(self, event: RunEvent) -> None:
+    def append(self, event: RunEvent) -> RunEvent:
         if event.run_id != self.run_id or event.session_id != self.session_id:
             raise ValueError("event run or session does not match recorder")
         if event.sequence != self._next_sequence:
@@ -67,6 +67,7 @@ class TraceRecorder:
         self._stream.flush()
         os.fsync(self._stream.fileno())
         self._next_sequence += 1
+        return validated
 
     def write_summary(self, summary: RunSummary) -> None:
         if summary.run_id != self.run_id or summary.session_id != self.session_id:

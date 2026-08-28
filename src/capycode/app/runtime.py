@@ -44,6 +44,7 @@ async def execute_task(
                 currency=resolved.currency,
                 pricing_snapshot_date=resolved.pricing_snapshot_date.isoformat(),
                 sensitive_values=(resolved.api_key,),
+                event_sink=(getattr(observer, "on_run_event", None) if observer else None),
             )
             return await runtime.run(
                 task,
