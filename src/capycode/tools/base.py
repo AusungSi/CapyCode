@@ -77,6 +77,11 @@ class ToolExecutor:
             return ToolResult(status="error", content=f"invalid tool arguments: {exc}")
         except (OSError, ValueError) as exc:
             return ToolResult(status="error", content=f"{type(exc).__name__}: {exc}")
+        except Exception as exc:
+            return ToolResult(
+                status="error",
+                content=f"unexpected {tool.name} failure: {type(exc).__name__}: {exc}",
+            )
 
     def _limit_result(self, result: ToolResult) -> ToolResult:
         if len(result.content) <= self.max_result_characters:

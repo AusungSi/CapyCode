@@ -253,3 +253,18 @@ async def test_tui_updates_assistant_message_during_stream(tmp_path: Path) -> No
         assert len(app.query(ThinkingIndicator)) == 0
         tool = app.query_one(ToolActivity)
         assert tool.has_class("tool-success")
+
+
+def test_tool_activity_compacts_long_failure_output() -> None:
+    activity = ToolActivity("run_tests", "python -m pytest -q")
+
+    activity.finish(
+        ToolResult(
+            status="error",
+            content="Tests exited with code 1.\n" + "failure details " * 100,
+        )
+    )
+
+    assert activity.has_class("tool-error")
+    assert len(str(activity.render())) < 220
+    assert "Tests exited with code 1." in str(activity.render())

@@ -161,7 +161,12 @@ class ToolActivity(Static):
             self.update(f"✓  {self.tool_name}  {self.target}")
         else:
             self.add_class("tool-error")
-            self.update(f"×  {self.tool_name}  {result.content}")
+            summary = next(
+                (line.strip() for line in result.content.splitlines() if line.strip()), "failed"
+            )
+            if len(summary) > 160:
+                summary = summary[:157] + "..."
+            self.update(f"×  {self.tool_name}  {summary}")
 
 
 class ThinkingIndicator(Static):
@@ -876,7 +881,11 @@ class CapyCodeApp(App[None]):
 
     async def on_tool_start(self, name: str, arguments: dict[str, object]) -> None:
         await self._stop_thinking()
-        target = str(arguments.get("path") or arguments.get("cwd") or "")
+        argv = arguments.get("argv")
+        if isinstance(argv, list):
+            target = " ".join(str(part) for part in argv[:4])
+        else:
+            target = str(arguments.get("path") or arguments.get("cwd") or "")
         self.active_tool = ToolActivity(name, target)
         transcript = self.query_one("#transcript", VerticalScroll)
         await transcript.mount(self.active_tool)

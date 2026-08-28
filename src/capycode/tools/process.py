@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
@@ -55,31 +56,33 @@ class CommandRunner:
         executable = self._resolve_executable(argv[0])
         working_directory = workspace.resolve_directory(cwd)
         self._validate_arguments(argv, workspace, working_directory)
-        environment = self._sanitized_environment()
+        with tempfile.TemporaryDirectory(prefix="capycode-pycache-") as pycache_directory:
+            environment = self._sanitized_environment()
+            environment["PYTHONPYCACHEPREFIX"] = pycache_directory
 
-        started = time.monotonic()
-        process = await asyncio.create_subprocess_exec(
-            executable,
-            *argv[1:],
-            cwd=working_directory,
-            env=environment,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        timed_out = False
-        try:
-            stdout_raw, stderr_raw = await asyncio.wait_for(
-                process.communicate(), timeout=timeout_seconds
+            started = time.monotonic()
+            process = await asyncio.create_subprocess_exec(
+                executable,
+                *argv[1:],
+                cwd=working_directory,
+                env=environment,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
-        except TimeoutError:
-            timed_out = True
-            process.kill()
-            stdout_raw, stderr_raw = await process.communicate()
-        except asyncio.CancelledError:
-            process.kill()
-            await process.communicate()
-            raise
+            timed_out = False
+            try:
+                stdout_raw, stderr_raw = await asyncio.wait_for(
+                    process.communicate(), timeout=timeout_seconds
+                )
+            except TimeoutError:
+                timed_out = True
+                process.kill()
+                stdout_raw, stderr_raw = await process.communicate()
+            except asyncio.CancelledError:
+                process.kill()
+                await process.communicate()
+                raise
 
         stdout, stdout_truncated = self._limit_stream(stdout_raw.decode("utf-8", errors="replace"))
         stderr, stderr_truncated = self._limit_stream(stderr_raw.decode("utf-8", errors="replace"))

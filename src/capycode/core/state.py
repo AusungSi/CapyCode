@@ -13,6 +13,7 @@ class SessionState(BaseModel):
     workspace: str
     task: str
     status: Literal["created", "running", "completed", "failed"] = "created"
+    termination_reason: str | None = None
     step: int = 0
     final_answer: str | None = None
     relevant_files: list[str] = Field(default_factory=list)
@@ -23,6 +24,7 @@ class SessionState(BaseModel):
     last_command: list[str] | None = None
     last_exit_code: int | None = None
     last_output: str = ""
+    last_tests_passed: bool | None = None
     last_error: str | None = None
     current_capability: str | None = None
     current_profile: str | None = None
