@@ -27,6 +27,17 @@ class GitDiffTool(Tool):
     async def execute(self, arguments: ToolInput, workspace: LocalWorkspace) -> ToolResult:
         if not isinstance(arguments, GitDiffInput):
             raise TypeError("git_diff received an unexpected argument model")
+        repository_check = await self.runner.run(
+            workspace,
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            timeout_seconds=15,
+        )
+        if repository_check.exit_code != 0:
+            return ToolResult(
+                status="success",
+                content="Git diff is unavailable because the workspace is not a Git repository.",
+                data={"available": False, "path": arguments.path},
+            )
         argv = ["git", "diff", "--no-ext-diff", "--no-color"]
         if arguments.staged:
             argv.append("--cached")
@@ -34,5 +45,13 @@ class GitDiffTool(Tool):
         result = await self.runner.run(workspace, argv, timeout_seconds=60)
         tool_result = process_tool_result(result, label="Git diff")
         if tool_result.status == "success" and not result.stdout:
-            return tool_result.model_copy(update={"content": "Git diff is empty."})
-        return tool_result
+            return tool_result.model_copy(
+                update={
+                    "content": "Git diff is empty.",
+                    "data": {**tool_result.data, "available": True},
+                }
+            )
+        return tool_result.model_copy(update={"data": {**tool_result.data, "available": True}})
+
+    async def aclose(self) -> None:
+        await self.runner.aclose()

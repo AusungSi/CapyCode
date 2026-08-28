@@ -129,12 +129,17 @@ class LocalWorkspace:
     ) -> list[str]:
         if max_results <= 0:
             raise ValueError("max_results must be positive")
-        directory = self.resolve_directory(relative_path)
-        directory_parts = directory.relative_to(self.root).parts
-        if any(part in self.DEFAULT_IGNORED_DIRECTORIES for part in directory_parts):
+        target = self._resolve(relative_path, must_exist=True)
+        target_parts = target.relative_to(self.root).parts
+        if any(part in self.DEFAULT_IGNORED_DIRECTORIES for part in target_parts):
             raise WorkspaceError(f"directory is excluded from discovery: {relative_path}")
+        if target.is_file():
+            relative = target.relative_to(self.root).as_posix()
+            return [relative] if PurePath(relative).match(pattern) else []
+        if not target.is_dir():
+            raise WorkspaceError(f"path is not a file or directory: {relative_path}")
         matches: list[str] = []
-        for current, directories, filenames in os.walk(directory, followlinks=False):
+        for current, directories, filenames in os.walk(target, followlinks=False):
             directories[:] = sorted(
                 name for name in directories if name not in self.DEFAULT_IGNORED_DIRECTORIES
             )

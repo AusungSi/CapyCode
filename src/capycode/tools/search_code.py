@@ -12,7 +12,7 @@ from .base import Tool, ToolInput, ToolResult
 
 class SearchCodeInput(ToolInput):
     query: str = Field(min_length=1, max_length=500)
-    path: str = Field(default=".", min_length=1, description="Workspace-relative directory")
+    path: str = Field(default=".", min_length=1, description="Workspace-relative file or directory")
     pattern: str = Field(default="*", min_length=1, description="File glob")
     regex: bool = False
     case_sensitive: bool = False
@@ -22,7 +22,7 @@ class SearchCodeInput(ToolInput):
 class SearchCodeTool(Tool):
     name: ClassVar[str] = "search_code"
     description: ClassVar[str] = (
-        "Search text in workspace files and return path, line, and preview."
+        "Search text in a workspace file or directory and return path, line, and preview."
     )
     input_model: ClassVar[type[ToolInput]] = SearchCodeInput
 

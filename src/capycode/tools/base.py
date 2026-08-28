@@ -35,6 +35,9 @@ class Tool(ABC):
     async def execute(self, arguments: ToolInput, workspace: LocalWorkspace) -> ToolResult:
         raise NotImplementedError
 
+    async def aclose(self) -> None:
+        return None
+
 
 class ToolRegistry:
     def __init__(self, tools: list[Tool]) -> None:
@@ -49,6 +52,10 @@ class ToolRegistry:
 
     def definitions(self) -> list[ToolDefinition]:
         return [self._tools[name].definition() for name in sorted(self._tools)]
+
+    async def aclose(self) -> None:
+        for tool in self._tools.values():
+            await tool.aclose()
 
 
 class ToolExecutor:

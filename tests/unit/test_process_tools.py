@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import subprocess
 from pathlib import Path
 
@@ -8,8 +9,10 @@ import pytest
 from capycode.tools import (
     CommandRunner,
     GitDiffTool,
+    ProcessStatusTool,
     RunCommandTool,
     RunTestsTool,
+    StopProcessTool,
     ToolExecutor,
     ToolRegistry,
 )
@@ -56,7 +59,7 @@ async def test_run_command_executes_argument_array_without_shell(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("executable", ["bash", "cmd", "git", "powershell", "pwsh"])
+@pytest.mark.parametrize("executable", ["bash", "cmd", "powershell", "pwsh"])
 async def test_run_command_rejects_non_allowlisted_programs(
     tmp_path: Path, executable: str
 ) -> None:
@@ -65,7 +68,7 @@ async def test_run_command_rejects_non_allowlisted_programs(
     result = await executor.execute("run_command", {"argv": [executable, "--version"]})
 
     assert result.status == "error"
-    assert "not allowed" in result.content
+    assert "blocked by command policy" in result.content
 
 
 @pytest.mark.asyncio
@@ -81,15 +84,28 @@ async def test_run_command_rejects_path_argument_outside_workspace(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_run_command_rejects_inline_python(tmp_path: Path) -> None:
+async def test_run_command_allows_inline_python_for_one_shot_checks(tmp_path: Path) -> None:
     executor = ToolExecutor(ToolRegistry([RunCommandTool()]), LocalWorkspace(tmp_path))
 
     result = await executor.execute(
-        "run_command", {"argv": [python_name(), "-c", "print('unsafe')"]}
+        "run_command", {"argv": [python_name(), "-c", "print('inline-ok')"]}
     )
 
-    assert result.status == "error"
-    assert "inline Python" in result.content
+    assert result.status == "success"
+    assert "inline-ok" in result.content
+
+
+@pytest.mark.asyncio
+async def test_run_command_allows_read_only_git_and_rejects_mutating_git(tmp_path: Path) -> None:
+    executor = ToolExecutor(ToolRegistry([RunCommandTool()]), LocalWorkspace(tmp_path))
+
+    version = await executor.execute("run_command", {"argv": ["git", "--version"]})
+    mutation = await executor.execute("run_command", {"argv": ["git", "reset", "--hard"]})
+
+    assert version.status == "success"
+    assert "git version" in version.content
+    assert mutation.status == "error"
+    assert "read-only subcommands" in mutation.content
 
 
 @pytest.mark.asyncio
@@ -140,6 +156,61 @@ async def test_command_timeout_terminates_process(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_background_server_can_be_checked_and_stopped(tmp_path: Path) -> None:
+    (tmp_path / "index.html").write_text("background-ok", encoding="utf-8")
+    (tmp_path / "server.py").write_text(
+        "from http.server import HTTPServer, SimpleHTTPRequestHandler\n"
+        "from pathlib import Path\n"
+        "server = HTTPServer(('127.0.0.1', 0), SimpleHTTPRequestHandler)\n"
+        "Path('port.txt').write_text(str(server.server_port), encoding='utf-8')\n"
+        "server.serve_forever()\n",
+        encoding="utf-8",
+    )
+    runner = CommandRunner()
+    registry = ToolRegistry(
+        [RunCommandTool(runner), ProcessStatusTool(runner), StopProcessTool(runner)]
+    )
+    executor = ToolExecutor(registry, LocalWorkspace(tmp_path))
+
+    started = await executor.execute(
+        "run_command",
+        {"argv": [python_name(), "server.py"], "run_in_background": True},
+    )
+    task_id = str(started.data["background_task_id"])
+    for _ in range(40):
+        if (tmp_path / "port.txt").exists():
+            break
+        await asyncio.sleep(0.05)
+    port = (tmp_path / "port.txt").read_text(encoding="utf-8")
+
+    status = await executor.execute("process_status", {"task_id": task_id})
+    checked = await executor.execute(
+        "run_command",
+        {
+            "argv": [
+                python_name(),
+                "-c",
+                (
+                    "import urllib.request; "
+                    f"print(urllib.request.urlopen('http://127.0.0.1:{port}/index.html').read().decode())"
+                ),
+            ]
+        },
+    )
+    stopped = await executor.execute("stop_process", {"task_id": task_id})
+    await registry.aclose()
+
+    assert started.status == "success"
+    assert started.data["running"] is True
+    assert status.status == "success"
+    assert status.data["running"] is True
+    assert checked.status == "success"
+    assert "background-ok" in checked.content
+    assert stopped.status == "success"
+    assert stopped.data["running"] is False
+
+
+@pytest.mark.asyncio
 async def test_command_output_preserves_head_and_tail(tmp_path: Path) -> None:
     (tmp_path / "output.py").write_text(
         "print('A' * 1_000_000 + 'B' * 1_000_000)\n", encoding="utf-8"
@@ -182,3 +253,14 @@ async def test_git_diff_is_read_only_and_returns_workspace_change(tmp_path: Path
     assert result.status == "success"
     assert "-before" in result.content
     assert "+after" in result.content
+
+
+@pytest.mark.asyncio
+async def test_git_diff_is_gracefully_unavailable_outside_repository(tmp_path: Path) -> None:
+    executor = ToolExecutor(ToolRegistry([GitDiffTool()]), LocalWorkspace(tmp_path))
+
+    result = await executor.execute("git_diff", {})
+
+    assert result.status == "success"
+    assert result.data["available"] is False
+    assert "not a Git repository" in result.content

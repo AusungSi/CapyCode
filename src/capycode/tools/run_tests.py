@@ -38,3 +38,6 @@ class RunTestsTool(Tool):
         return tool_result.model_copy(
             update={"data": {**tool_result.data, "tests_passed": tool_result.status == "success"}}
         )
+
+    async def aclose(self) -> None:
+        await self.runner.aclose()

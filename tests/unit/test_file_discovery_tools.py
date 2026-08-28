@@ -42,6 +42,17 @@ async def test_search_code_returns_lines_without_marking_files_as_read(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_search_code_accepts_a_single_file_path(tmp_path: Path) -> None:
+    (tmp_path / "index.html").write_text("<main>Snake board</main>\n", encoding="utf-8")
+    executor = ToolExecutor(ToolRegistry([SearchCodeTool()]), LocalWorkspace(tmp_path))
+
+    result = await executor.execute("search_code", {"query": "Snake", "path": "index.html"})
+
+    assert result.status == "success"
+    assert result.content == "index.html:1: <main>Snake board</main>"
+
+
+@pytest.mark.asyncio
 async def test_search_code_reports_invalid_regex(tmp_path: Path) -> None:
     executor = ToolExecutor(ToolRegistry([SearchCodeTool()]), LocalWorkspace(tmp_path))
 
