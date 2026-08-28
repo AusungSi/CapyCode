@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import date
@@ -10,6 +12,8 @@ from textual import events, on, work
 from textual.app import App, ComposeResult
 from textual.binding import BindingType
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
+from textual.message import Message as TextualMessage
 from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
@@ -26,7 +30,17 @@ from capycode.config.loader import DEFAULT_MODELS_PATH
 from capycode.config.user_settings import UserEndpointSettings, UserSettingsStore
 from capycode.core import RuntimeObserver, SessionState, SessionStore, SessionSummary
 from capycode.tools import ToolResult
-from capycode.trace import RunCatalog
+from capycode.trace import (
+    AssistantTextEvent,
+    ContextSnapshotEvent,
+    RunCatalog,
+    RunEvent,
+    RunStatusEvent,
+    RunSummary,
+    StepTraceEvent,
+    ToolRequestEvent,
+    ToolResultEvent,
+)
 
 from .runtime import discover_models, execute_task
 
@@ -125,6 +139,10 @@ class ChatMessage(Vertical):
         self.content += delta
         await self.query_one(Markdown).update(self.content)
 
+    async def set_content(self, content: str) -> None:
+        self.content = content
+        await self.query_one(Markdown).update(content)
+
 
 class NoticeMessage(Static):
     DEFAULT_CSS = """
@@ -142,7 +160,15 @@ class NoticeMessage(Static):
     """
 
 
-class ToolActivity(Static):
+class RunEventMessage(TextualMessage):
+    """Transfers a persisted, redacted run event onto Textual's message pump."""
+
+    def __init__(self, event: RunEvent) -> None:
+        super().__init__()
+        self.event = event
+
+
+class ToolActivity(Static, can_focus=True):
     DEFAULT_CSS = """
     ToolActivity {
         height: auto;
@@ -157,26 +183,102 @@ class ToolActivity(Static):
     ToolActivity.tool-error {
         color: $error;
     }
+
+    ToolActivity:focus {
+        background: $panel;
+    }
     """
 
-    def __init__(self, name: str, target: str) -> None:
-        super().__init__(f"◌  {name}  {target}")
+    def __init__(
+        self,
+        name: str,
+        target: str,
+        *,
+        tool_call_id: str | None = None,
+        arguments: dict[str, object] | None = None,
+    ) -> None:
+        super().__init__(markup=False)
         self.tool_name = name
         self.target = target
+        self.tool_call_id = tool_call_id
+        self.arguments = arguments or {}
+        self.result: ToolResult | None = None
+        self.latency_seconds: float | None = None
+        self.expanded = False
+        self._refresh_content()
 
-    def finish(self, result: ToolResult) -> None:
+    def finish(self, result: ToolResult, latency_seconds: float | None = None) -> None:
+        self.result = result
+        self.latency_seconds = latency_seconds
         self.remove_class("tool-success", "tool-error")
         if result.status == "success":
             self.add_class("tool-success")
-            self.update(f"✓  {self.tool_name}  {self.target}")
         else:
             self.add_class("tool-error")
-            summary = next(
-                (line.strip() for line in result.content.splitlines() if line.strip()), "failed"
-            )
-            if len(summary) > 160:
-                summary = summary[:157] + "..."
-            self.update(f"×  {self.tool_name}  {summary}")
+        self._refresh_content()
+
+    def toggle_details(self) -> None:
+        self.expanded = not self.expanded
+        self._refresh_content()
+
+    def on_click(self) -> None:
+        self.toggle_details()
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key in {"enter", "space"}:
+            self.toggle_details()
+            event.stop()
+
+    def _refresh_content(self) -> None:
+        glyph = "◌"
+        suffix = self.target
+        if self.result is not None:
+            glyph = "✓" if self.result.status == "success" else "×"
+            if self.result.status == "error":
+                suffix = next(
+                    (line.strip() for line in self.result.content.splitlines() if line.strip()),
+                    "failed",
+                )
+                if len(suffix) > 160:
+                    suffix = suffix[:157] + "..."
+        disclosure = "▾" if self.expanded else "▸"
+        header = f"{glyph}  {self.tool_name}  {suffix}  {disclosure}"
+        if not self.expanded:
+            self.update(header)
+            return
+        self.update(f"{header}\n{self._details_text()}")
+
+    def _details_text(self) -> str:
+        lines = [f"   call: {self.tool_call_id or '-'}"]
+        if self.arguments:
+            rendered = json.dumps(self.arguments, ensure_ascii=False, indent=2, sort_keys=True)
+            lines.append("   arguments:\n" + self._indent(_bounded_text(rendered)))
+        if self.result is not None:
+            latency = f"{self.latency_seconds:.3f}s" if self.latency_seconds is not None else "-"
+            lines.append(f"   status: {self.result.status}  ·  duration: {latency}")
+            metadata = {
+                key: self.result.data[key]
+                for key in ("cwd", "exit_code", "task_id", "stdout_truncated", "stderr_truncated")
+                if key in self.result.data
+            }
+            if metadata:
+                lines.append(
+                    "   metadata: " + json.dumps(metadata, ensure_ascii=False, sort_keys=True)
+                )
+            if self.result.content:
+                lines.append("   output:\n" + self._indent(_bounded_text(self.result.content)))
+        return "\n".join(lines)
+
+    @staticmethod
+    def _indent(value: str) -> str:
+        return "\n".join(f"      {line}" for line in value.splitlines())
+
+
+def _bounded_text(value: str, limit: int = 4000) -> str:
+    if len(value) <= limit:
+        return value
+    half = (limit - 40) // 2
+    return f"{value[:half]}\n... [界面已截断] ...\n{value[-half:]}"
 
 
 class ThinkingIndicator(Static):
@@ -596,6 +698,161 @@ class SessionPickerScreen(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+class RunPickerScreen(ModalScreen[str | None]):
+    BINDINGS: ClassVar[list[BindingType]] = [("escape", "cancel", "取消")]
+
+    CSS = """
+    RunPickerScreen {
+        align: center middle;
+        background: $background 70%;
+    }
+
+    #run-picker-dialog {
+        width: 95%;
+        max-width: 96;
+        height: auto;
+        max-height: 85%;
+        border: round $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #run-picker-title { text-style: bold; }
+    #run-picker-list { height: auto; max-height: 18; margin: 1 0; }
+    #run-picker-hint { color: $text-muted; }
+    """
+
+    def __init__(self, summaries: list[RunSummary]) -> None:
+        super().__init__()
+        self.summaries = summaries
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="run-picker-dialog"):
+            yield Label("运行记录", id="run-picker-title")
+            yield OptionList(
+                *[
+                    Option(
+                        (
+                            f"{item.run_id[:8]}  {item.status:<9}  {item.model_id}  "
+                            f"{item.steps} steps  {item.latency_seconds:.2f}s  "
+                            f"[dim]{item.finished_at.astimezone():%m-%d %H:%M}[/dim]"
+                        ),
+                        id=item.run_id,
+                    )
+                    for item in self.summaries
+                ],
+                id="run-picker-list",
+            )
+            yield Static("↑/↓ 选择  ·  Enter 查看  ·  Esc 取消", id="run-picker-hint")
+
+    def on_mount(self) -> None:
+        picker = self.query_one("#run-picker-list", OptionList)
+        picker.highlighted = 0
+        picker.focus()
+
+    @on(OptionList.OptionSelected, "#run-picker-list")
+    def select_run(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(event.option_id)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class RunDetailScreen(ModalScreen[None]):
+    BINDINGS: ClassVar[list[BindingType]] = [
+        ("escape", "close", "关闭"),
+        ("q", "close", "关闭"),
+    ]
+
+    CSS = """
+    RunDetailScreen {
+        align: center middle;
+        background: $background 70%;
+    }
+
+    #run-detail-dialog {
+        width: 95%;
+        max-width: 100;
+        height: 88%;
+        border: round $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #run-detail-title { height: 1; text-style: bold; }
+    #run-detail-body { height: 1fr; margin: 1 0; scrollbar-size: 1 1; }
+    #run-detail-content { height: auto; }
+    #run-detail-hint { height: 1; color: $text-muted; }
+    """
+
+    def __init__(self, summary: RunSummary, events_: list[RunEvent]) -> None:
+        super().__init__()
+        self.summary = summary
+        self.events_ = events_
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="run-detail-dialog"):
+            yield Label(f"Run {self.summary.run_id[:8]}", id="run-detail-title")
+            with VerticalScroll(id="run-detail-body"):
+                yield Static(self._render_detail(), id="run-detail-content", markup=False)
+            yield Static("Esc/Q 关闭  ·  ↑/↓ 滚动", id="run-detail-hint")
+
+    def _render_detail(self) -> str:
+        summary = self.summary
+        tokens = summary.input_tokens + summary.output_tokens
+        price = f"{summary.cost:.6f} {summary.currency}"
+        lines = [
+            f"状态        {summary.status} / {summary.termination_reason}",
+            f"模型        {summary.model_id} ({summary.provider})",
+            f"时间        {summary.finished_at.astimezone():%Y-%m-%d %H:%M:%S}",
+            f"统计        {summary.steps} steps · {tokens} tokens · {price}",
+            f"耗时        {summary.latency_seconds:.3f}s",
+            f"工具        {summary.tool_successes} 成功 / {summary.tool_failures} 失败",
+            f"任务        {summary.task}",
+        ]
+        if summary.modified_files:
+            lines.append("修改文件    " + ", ".join(summary.modified_files))
+        if summary.error:
+            lines.append("错误        " + summary.error)
+        lines.append("\n步骤")
+        for event in self.events_:
+            if isinstance(event, StepTraceEvent):
+                step_tokens = event.input_tokens + event.output_tokens
+                first = (
+                    f" · first {event.first_token_latency_seconds:.3f}s"
+                    if event.first_token_latency_seconds is not None
+                    else ""
+                )
+                lines.append(
+                    f"  #{event.step}  {event.latency_seconds:.3f}s{first} · "
+                    f"{step_tokens} tokens · {event.cost:.6f} {event.currency}"
+                )
+            elif isinstance(event, ToolRequestEvent):
+                lines.append(f"    ◌ {event.tool_name}  {_tool_target(event.arguments)}")
+            elif isinstance(event, ToolResultEvent):
+                glyph = "✓" if event.status == "success" else "×"
+                excerpt = next(
+                    (line.strip() for line in event.content.splitlines() if line.strip()), ""
+                )
+                lines.append(
+                    f"    {glyph} {event.tool_name}  {event.latency_seconds:.3f}s  "
+                    f"{excerpt[:140]}"
+                )
+        if summary.final_diff:
+            lines.append("\n最终 diff\n" + _bounded_text(summary.final_diff, 8000))
+        return "\n".join(lines)
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
+def _tool_target(arguments: dict[str, object]) -> str:
+    argv = arguments.get("argv")
+    if isinstance(argv, list):
+        return " ".join(str(part) for part in argv[:6])
+    return str(arguments.get("path") or arguments.get("task_id") or arguments.get("cwd") or "")
+
+
 class CapyCodeApp(App[None]):
     TITLE = "CapyCode"
     SUB_TITLE = "Local Coding Agent"
@@ -730,9 +987,18 @@ class CapyCodeApp(App[None]):
         self.history_index: int | None = None
         self.streaming_message: ChatMessage | None = None
         self.thinking_indicator: ThinkingIndicator | None = None
-        self.active_tool: ToolActivity | None = None
+        self.tool_activities: dict[str, ToolActivity] = {}
+        self.fallback_active_tool: ToolActivity | None = None
+        self.event_stream_active = False
         self.received_stream_delta = False
         self.splash_visible = True
+        self.live_run_id: str | None = None
+        self.live_input_tokens = 0
+        self.live_output_tokens = 0
+        self.live_cost = 0.0
+        self.live_currency = ""
+        self.run_started_counter: float | None = None
+        self.cancel_requested = False
 
     def compose(self) -> ComposeResult:
         with Container(id="splash"):
@@ -768,6 +1034,7 @@ class CapyCodeApp(App[None]):
         self._write_system(f"输入任务开始工作，输入 / 查看命令。{resume_hint}")
         self._refresh_status()
         self.query_one("#prompt", Input).focus()
+        self.set_interval(0.5, self._refresh_status)
         self.set_timer(1.15, self._dismiss_splash)
         if self.initial_resume is not None:
             self.set_timer(0.05, self._resume_initial_session)
@@ -1018,14 +1285,19 @@ class CapyCodeApp(App[None]):
         if not summaries:
             self._write_system("当前工作区还没有运行记录。")
             return
-        lines = [
-            (
-                f"{item.run_id[:8]}  {item.status:<9}  {item.model_id}  "
-                f"{item.steps} steps  {item.latency_seconds:.2f}s"
-            )
-            for item in summaries
-        ]
-        self._write_system("最近运行：\n" + "\n".join(lines))
+        self.push_screen(RunPickerScreen(summaries), self._run_picker_closed)
+
+    def _run_picker_closed(self, run_id: str | None) -> None:
+        if run_id is None:
+            return
+        catalog = RunCatalog(self.workspace)
+        try:
+            summary = catalog.resolve(run_id)
+            events_ = catalog.events(run_id)
+        except ValueError as exc:
+            self._write_error(str(exc))
+            return
+        self.push_screen(RunDetailScreen(summary, events_))
 
     def _resume_session(self, value: str) -> None:
         if self.busy:
@@ -1107,12 +1379,21 @@ class CapyCodeApp(App[None]):
                 f"输出 {pricing.output_per_million:g} {pricing.currency} / 1M tokens"
             )
 
-    @work(exclusive=True)
+    @work(exclusive=True, group="agent-run")
     async def run_task(self, task: str) -> None:
         self.busy = True
+        self.cancel_requested = False
         self.received_stream_delta = False
         self.streaming_message = None
-        self.active_tool = None
+        self.tool_activities = {}
+        self.fallback_active_tool = None
+        self.event_stream_active = False
+        self.live_run_id = None
+        self.live_input_tokens = 0
+        self.live_output_tokens = 0
+        self.live_cost = 0.0
+        self.live_currency = ""
+        self.run_started_counter = time.perf_counter()
         self._refresh_status()
         try:
             state = await self.task_runner(
@@ -1142,15 +1423,76 @@ class CapyCodeApp(App[None]):
         except Exception as exc:
             self._write_error(str(exc))
         finally:
+            cancelled = self.cancel_requested
             await self._stop_thinking()
             self.streaming_message = None
             self.busy = False
+            self.cancel_requested = False
+            self.run_started_counter = None
+            if cancelled:
+                self._write_system("当前任务已取消，已完成运行记录收尾。")
             self._refresh_status()
             self.query_one("#prompt", Input).focus()
 
     def _checkpoint_session(self, state: SessionState) -> None:
         self.last_session = state
         self.session_store.save(state, model_id=self.model_id or state.current_model or "unknown")
+
+    def on_run_event(self, event: RunEvent) -> None:
+        self.event_stream_active = True
+        self.post_message(RunEventMessage(event))
+
+    @on(RunEventMessage)
+    async def project_run_event(self, message: RunEventMessage) -> None:
+        event = message.event
+        transcript = self.query_one("#transcript", VerticalScroll)
+        if isinstance(event, RunStatusEvent):
+            self.live_run_id = event.run_id
+            if event.status == "started":
+                self.run_started_counter = time.perf_counter()
+            self._refresh_status()
+        elif isinstance(event, ToolRequestEvent):
+            await self._stop_thinking()
+            requested_activity = ToolActivity(
+                event.tool_name,
+                _tool_target(event.arguments),
+                tool_call_id=event.tool_call_id,
+                arguments=event.arguments,
+            )
+            self.tool_activities[event.tool_call_id] = requested_activity
+            await transcript.mount(requested_activity)
+            transcript.scroll_end(animate=False)
+        elif isinstance(event, ToolResultEvent):
+            result_activity = self.tool_activities.get(event.tool_call_id)
+            if result_activity is not None:
+                result_activity.finish(
+                    ToolResult(status=event.status, content=event.content, data=event.data),
+                    event.latency_seconds,
+                )
+            transcript.scroll_end(animate=False)
+        elif isinstance(event, AssistantTextEvent) and event.text:
+            await self._stop_thinking()
+            if self.streaming_message is None:
+                self.streaming_message = ChatMessage("CapyCode", event.text, assistant=True)
+                await transcript.mount(self.streaming_message)
+            elif self.streaming_message.content != event.text:
+                await self.streaming_message.set_content(event.text)
+            self.received_stream_delta = True
+            transcript.scroll_end(animate=False)
+        elif isinstance(event, StepTraceEvent):
+            self.live_input_tokens += event.input_tokens
+            self.live_output_tokens += event.output_tokens
+            self.live_cost += event.cost
+            self.live_currency = event.currency
+            self._refresh_status()
+        elif isinstance(event, ContextSnapshotEvent):
+            notice = NoticeMessage(
+                f"·  上下文已压缩：{event.estimated_tokens_before} → "
+                f"{event.estimated_tokens_after} tokens",
+                markup=False,
+            )
+            await transcript.mount(notice)
+            transcript.scroll_end(animate=False)
 
     async def on_model_start(self, step: int) -> None:
         self.streaming_message = None
@@ -1173,21 +1515,18 @@ class CapyCodeApp(App[None]):
 
     async def on_tool_start(self, name: str, arguments: dict[str, object]) -> None:
         await self._stop_thinking()
-        argv = arguments.get("argv")
-        if isinstance(argv, list):
-            target = " ".join(str(part) for part in argv[:4])
-        else:
-            target = str(
-                arguments.get("path") or arguments.get("task_id") or arguments.get("cwd") or ""
-            )
-        self.active_tool = ToolActivity(name, target)
+        if self.event_stream_active:
+            return
+        self.fallback_active_tool = ToolActivity(name, _tool_target(arguments))
         transcript = self.query_one("#transcript", VerticalScroll)
-        await transcript.mount(self.active_tool)
+        await transcript.mount(self.fallback_active_tool)
         transcript.scroll_end(animate=False)
 
     async def on_tool_result(self, name: str, result: ToolResult) -> None:
-        if self.active_tool is not None and self.active_tool.tool_name == name:
-            self.active_tool.finish(result)
+        if self.event_stream_active:
+            return
+        if self.fallback_active_tool is not None and self.fallback_active_tool.tool_name == name:
+            self.fallback_active_tool.finish(result)
         self.query_one("#transcript", VerticalScroll).scroll_end(animate=False)
 
     async def _stop_thinking(self) -> None:
@@ -1198,15 +1537,16 @@ class CapyCodeApp(App[None]):
                 await indicator.remove()
 
     def action_cancel_or_quit(self) -> None:
-        workers = list(self.workers)
-        if self.busy and workers:
-            for worker in workers:
-                worker.cancel()
-            self.busy = False
-            self._write_system("已取消当前任务。")
-            self._refresh_status()
-        else:
-            self.exit()
+        run_workers = [worker for worker in self.workers if worker.group == "agent-run"]
+        if self.busy:
+            if run_workers and not self.cancel_requested:
+                self.cancel_requested = True
+                for worker in run_workers:
+                    worker.cancel()
+                self._write_system("正在取消当前任务并保存运行记录…")
+                self._refresh_status()
+            return
+        self.exit()
 
     def action_clear_transcript(self) -> None:
         self.query_one("#transcript", VerticalScroll).remove_children()
@@ -1228,22 +1568,41 @@ class CapyCodeApp(App[None]):
         transcript.mount(widget)
         transcript.scroll_end(animate=False)
 
-    def _status_text(self) -> str:
-        state = "运行中" if self.busy else "就绪"
+    def _status_text(self, width: int | None = None) -> str:
+        state = "取消中" if self.cancel_requested else ("运行中" if self.busy else "就绪")
         session = self.last_session.session_id[:8] if self.last_session else "new"
-        run_id = (
-            self.last_session.current_run_id[:8]
-            if self.last_session and self.last_session.current_run_id
-            else "-"
+        saved_run = self.last_session.current_run_id if self.last_session else None
+        run_id = (self.live_run_id or saved_run or "-")[:8]
+        terminal_width = width or self.size.width
+        model = self.model_id or "未配置"
+        tokens = self.live_input_tokens + self.live_output_tokens
+        elapsed = (
+            time.perf_counter() - self.run_started_counter
+            if self.busy and self.run_started_counter is not None
+            else (self.last_session.last_run_latency if self.last_session else 0)
         )
-        return (
-            f"{state}  ·  model: {self.model_id or '未配置'}  ·  session: {session}"
-            f"  ·  run: {run_id}  ·  workspace: {self.workspace}"
+        core = f"{state} · {model} · run {run_id}"
+        if terminal_width < 72:
+            return core
+        metrics = (
+            f" · {tokens} tok · {self.live_cost:.4f} "
+            f"{self.live_currency or '-'} · {elapsed:.1f}s"
         )
+        if terminal_width < 105:
+            return core + metrics
+        workspace_name = self.workspace.name or str(self.workspace)
+        return f"{core} · session {session}{metrics} · {workspace_name}"
 
     def _refresh_status(self) -> None:
-        self.query_one("#status-line", Static).update(self._status_text())
-        self._refresh_session_bar()
+        try:
+            self.query_one("#status-line", Static).update(self._status_text())
+            self._refresh_session_bar()
+        except NoMatches:
+            # A final interval tick may race with Textual removing the screen tree.
+            return
+
+    def on_resize(self) -> None:
+        self._refresh_status()
 
     def _refresh_session_bar(self) -> None:
         workspace_name = self.workspace.name or str(self.workspace)

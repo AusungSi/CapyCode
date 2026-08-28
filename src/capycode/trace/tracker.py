@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,6 +16,7 @@ if TYPE_CHECKING:
 
 from .events import (
     AssistantTextEvent,
+    RunEvent,
     RunStatusEvent,
     RunSummary,
     StepTraceEvent,
@@ -36,6 +38,7 @@ class RunTrackingConfig:
     currency: str
     pricing_snapshot_date: str
     sensitive_values: tuple[str, ...] = ()
+    event_sink: Callable[[RunEvent], None] | None = None
 
 
 class RunTracker:
@@ -76,7 +79,7 @@ class RunTracker:
 
     def start(self, task: str) -> None:
         self.task = task
-        self.recorder.append(
+        self._append(
             RunStatusEvent(
                 run_id=self.run_id,
                 session_id=self.session_id,
@@ -84,7 +87,7 @@ class RunTracker:
                 status="started",
             )
         )
-        self.recorder.append(
+        self._append(
             UserTaskEvent(
                 run_id=self.run_id,
                 session_id=self.session_id,
@@ -94,7 +97,7 @@ class RunTracker:
         )
 
     def record_assistant(self, step: int, response: LLMResponse) -> None:
-        self.recorder.append(
+        self._append(
             AssistantTextEvent(
                 run_id=self.run_id,
                 session_id=self.session_id,
@@ -113,7 +116,7 @@ class RunTracker:
         tool_name: str,
         arguments: dict[str, object],
     ) -> None:
-        self.recorder.append(
+        self._append(
             ToolRequestEvent(
                 run_id=self.run_id,
                 session_id=self.session_id,
@@ -135,7 +138,7 @@ class RunTracker:
         result: ToolResult,
         latency_seconds: float,
     ) -> ToolCallTrace:
-        self.recorder.append(
+        self._append(
             ToolResultEvent(
                 run_id=self.run_id,
                 session_id=self.session_id,
@@ -182,7 +185,7 @@ class RunTracker:
         self.input_tokens += response.usage.input_tokens
         self.output_tokens += response.usage.output_tokens
         self.cost += cost
-        self.recorder.append(
+        self._append(
             StepTraceEvent(
                 run_id=self.run_id,
                 session_id=self.session_id,
@@ -229,7 +232,7 @@ class RunTracker:
         if resolved_status not in {"completed", "failed", "cancelled"}:
             raise ValueError(f"invalid final run status: {resolved_status}")
         reason = termination_reason or state.termination_reason or resolved_status
-        self.recorder.append(
+        self._append(
             RunStatusEvent(
                 run_id=self.run_id,
                 session_id=self.session_id,
@@ -282,3 +285,8 @@ class RunTracker:
             input_tokens * self.config.input_per_million
             + output_tokens * self.config.output_per_million
         ) / 1_000_000
+
+    def _append(self, event: RunEvent) -> None:
+        persisted_event = self.recorder.append(event)
+        if self.config.event_sink is not None:
+            self.config.event_sink(persisted_event)

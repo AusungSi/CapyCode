@@ -183,3 +183,37 @@ def test_run_tracker_synthesizes_result_for_interrupted_tool(tmp_path: Path) -> 
     assert result["status"] == "error"
     assert result["data"]["synthetic"] is True
     assert tracker.recorder.pending_tool_call_ids == frozenset()
+
+
+def test_run_tracker_emits_the_redacted_persisted_event(tmp_path: Path) -> None:
+    received: list[object] = []
+    tracker = RunTracker(
+        tmp_path,
+        "session-six",
+        RunTrackingConfig(
+            provider="fake",
+            model_id="fake-model",
+            input_per_million=0,
+            output_per_million=0,
+            currency="USD",
+            pricing_snapshot_date="2026-08-28",
+            sensitive_values=("local-secret",),
+            event_sink=received.append,
+        ),
+        run_id="run-six",
+    )
+
+    tracker.start("inspect local-secret")
+    tracker.record_tool_request(
+        1,
+        "call-one",
+        "run_command",
+        {"argv": ["python", "script.py"], "token": "local-secret"},
+    )
+    tracker.synthesize_pending_results("cancelled")
+    tracker.recorder.close()
+
+    serialized = "\n".join(str(event) for event in received)
+    assert "local-secret" not in serialized
+    assert REDACTED in serialized
+    assert len(received) == 4

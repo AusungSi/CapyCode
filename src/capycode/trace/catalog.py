@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import TypeAlias
 
 from pydantic import ValidationError
 
-from .events import RunSummary
+from .events import RUN_EVENT_ADAPTER, RunEvent, RunSummary
+
+RunEventList: TypeAlias = list[RunEvent]
 
 
 class RunCatalog:
@@ -36,6 +39,15 @@ class RunCatalog:
         if len(matches) > 1:
             raise ValueError(f"运行记录标识不唯一: {value}")
         return matches[0]
+
+    def events(self, value: str) -> RunEventList:
+        summary = self.resolve(value)
+        trace_path = self.root / summary.run_id / "trace.jsonl"
+        try:
+            lines = trace_path.read_text(encoding="utf-8").splitlines()
+            return [RUN_EVENT_ADAPTER.validate_json(line) for line in lines if line.strip()]
+        except (OSError, ValidationError, ValueError) as exc:
+            raise ValueError(f"无法读取运行事件 {trace_path}: {exc}") from exc
 
     @staticmethod
     def _read(path: Path, *, strict: bool) -> RunSummary | None:

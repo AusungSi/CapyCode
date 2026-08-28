@@ -157,9 +157,9 @@ class AgentRuntime:
                     seen_tool_calls: set[str] = set()
                     tool_traces: list[ToolCallTrace] = []
                     for index, call in enumerate(response.tool_calls):
-                        await runtime_observer.on_tool_start(call.name, call.arguments)
                         if tracker is not None:
                             tracker.record_tool_request(step, call.id, call.name, call.arguments)
+                        await runtime_observer.on_tool_start(call.name, call.arguments)
                         tool_started = time.perf_counter()
                         call_signature = json.dumps(
                             (call.name, call.arguments),
