@@ -1,5 +1,5 @@
 """Guarded local filesystem, process, and Git abstractions."""
 
-from .local import LocalWorkspace, WorkspaceError
+from .local import FileReadLedger, FileReadRecord, LocalWorkspace, WorkspaceError
 
-__all__ = ["LocalWorkspace", "WorkspaceError"]
+__all__ = ["FileReadLedger", "FileReadRecord", "LocalWorkspace", "WorkspaceError"]
