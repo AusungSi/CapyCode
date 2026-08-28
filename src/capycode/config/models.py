@@ -1,0 +1,59 @@
+from __future__ import annotations
+
+from datetime import date
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+class StrictConfigModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class PricingConfig(StrictConfigModel):
+    input_per_million: float = Field(ge=0)
+    output_per_million: float = Field(ge=0)
+    snapshot_date: date
+
+
+class ModelConfig(StrictConfigModel):
+    provider: Literal["openai-compatible"]
+    model: str = Field(min_length=1)
+    base_url_env: str = Field(pattern=r"^[A-Z][A-Z0-9_]*$")
+    api_key_env: str = Field(pattern=r"^[A-Z][A-Z0-9_]*$")
+    context_window: int = Field(gt=0)
+    pricing: PricingConfig
+
+
+class ModelRegistryConfig(StrictConfigModel):
+    models: dict[str, ModelConfig]
+
+    @model_validator(mode="after")
+    def require_models(self) -> ModelRegistryConfig:
+        if not self.models:
+            raise ValueError("at least one model must be configured")
+        return self
+
+
+class BudgetConfig(StrictConfigModel):
+    max_output_tokens: int = Field(gt=0)
+    max_steps: int = Field(gt=0)
+
+
+class ProfileConfig(StrictConfigModel):
+    capability: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
+    model: str = Field(min_length=1)
+    instruction: str = Field(min_length=1)
+    tools: list[str] = Field(min_length=1)
+    context_policy: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
+    budget: BudgetConfig
+
+
+class ProfileRegistryConfig(StrictConfigModel):
+    profiles: dict[str, ProfileConfig]
+
+    @model_validator(mode="after")
+    def require_profiles(self) -> ProfileRegistryConfig:
+        if not self.profiles:
+            raise ValueError("at least one profile must be configured")
+        return self

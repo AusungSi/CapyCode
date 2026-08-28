@@ -1,0 +1,20 @@
+profiles:
+  retrieval_fast:
+    capability: repository_retrieval
+    model: small
+    instruction: prompts/retrieval.md
+    tools: [list_files, search_code, read_file]
+    context_policy: retrieval
+    budget:
+      max_output_tokens: 2048
+      max_steps: 3
+
+  diagnosis_strong:
+    capability: failure_diagnosis
+    model: strong
+    instruction: prompts/diagnosis.md
+    tools: [read_file, search_code, run_command]
+    context_policy: diagnosis
+    budget:
+      max_output_tokens: 4096
+      max_steps: 4
