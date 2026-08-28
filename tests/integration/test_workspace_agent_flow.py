@@ -147,3 +147,64 @@ async def test_agent_stops_after_three_identical_tool_steps(tmp_path: Path) -> N
     assert state.status == "failed"
     assert state.termination_reason == "loop_detected"
     assert len([message for message in state.history if message.role == "tool"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_agent_skips_duplicate_tool_calls_within_one_step(tmp_path: Path) -> None:
+    arguments = {"path": "index.html", "content": "<main>demo</main>\n"}
+    client = ScriptedLLM(
+        [
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(id="write-1", name="write_file", arguments=arguments),
+                    ToolCall(id="write-2", name="write_file", arguments=arguments),
+                ]
+            ),
+            LLMResponse(content="Created the page once."),
+        ]
+    )
+    runtime = AgentRuntime(client, build_p0_runtime_tools(), max_steps=3)
+
+    state = await runtime.run("Create a page", tmp_path, "fake-model")
+
+    assert state.status == "completed"
+    tool_messages = [message for message in state.history if message.role == "tool"]
+    assert len(tool_messages) == 2
+    duplicate = json.loads(tool_messages[1].content or "{}")
+    assert duplicate["data"]["duplicate_skipped"] is True
+
+
+@pytest.mark.asyncio
+async def test_non_git_single_file_web_workspace_finishes_without_retries(tmp_path: Path) -> None:
+    client = ScriptedLLM(
+        [
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="write-page",
+                        name="write_file",
+                        arguments={"path": "index.html", "content": "<main>Snake</main>\n"},
+                    )
+                ]
+            ),
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="search-page",
+                        name="search_code",
+                        arguments={"query": "Snake", "path": "index.html"},
+                    ),
+                    ToolCall(id="diff-page", name="git_diff", arguments={}),
+                ]
+            ),
+            LLMResponse(content="Created and checked the standalone page."),
+        ]
+    )
+    runtime = AgentRuntime(client, build_p0_runtime_tools(), max_steps=4)
+
+    state = await runtime.run("Create a standalone web page", tmp_path, "fake-model")
+
+    assert state.status == "completed"
+    assert state.modified_files == ["index.html"]
+    assert "not a Git repository" in state.current_diff
+    assert (tmp_path / "index.html").read_text(encoding="utf-8") == "<main>Snake</main>\n"

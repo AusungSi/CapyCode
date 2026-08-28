@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from capycode.config.loader import load_models
@@ -25,6 +26,8 @@ async def execute_task(
     max_steps: int,
     settings_store: UserSettingsStore | None = None,
     observer: RuntimeObserver | None = None,
+    session_state: SessionState | None = None,
+    checkpoint: Callable[[SessionState], None] | None = None,
 ) -> SessionState:
     registry = load_models(models_path)
     try:
@@ -37,7 +40,18 @@ async def execute_task(
     resolved = resolve_model(model_alias, model_config, store.load())
     client = OpenAICompatibleLLM(resolved.base_url, resolved.api_key)
     try:
-        runtime = AgentRuntime(client, build_p0_runtime_tools(), max_steps=max_steps)
-        return await runtime.run(task, workspace, resolved.model, observer)
+        tools = build_p0_runtime_tools()
+        try:
+            runtime = AgentRuntime(client, tools, max_steps=max_steps)
+            return await runtime.run(
+                task,
+                workspace,
+                resolved.model,
+                observer,
+                session_state,
+                checkpoint,
+            )
+        finally:
+            await tools.aclose()
     finally:
         await client.aclose()
