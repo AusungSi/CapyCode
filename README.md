@@ -4,16 +4,19 @@
 
 ## 当前阶段
 
-当前开发阶段为 **P0-0 Project Scaffold**，仅包含：
+当前开发阶段为 **P0-1 Runtime Skeleton**。P0-0 工程骨架已经完成；本阶段新增：
 
-- Python 3.11 与 uv 工程配置
-- `capycode` 模块边界
-- 模型与 Profile YAML 配置校验
-- 本地环境自检命令
-- Windows/Linux CI
-- 分支、提交与 PR 审计规范
+- 统一 LLM Request/Response/Tool Call 类型
+- OpenAI-compatible Chat Completions 适配器
+- `SessionState` 与最小 Agent Loop
+- 受 Workspace 边界保护的 `read_file`
+- FakeLLM 确定性双轮闭环
+- Textual 全屏终端界面和 Slash Command
+- 用户目录下的本地模型与凭据配置
+- OpenAI-compatible SSE 流式输出和增量工具调用组装
+- 用户、Agent、工具与系统状态分层消息视图
 
-Agent Loop、工具执行、Trace 和 Textual TUI 将在后续独立模块中实现。
+完整 Coding Tool Loop 和 Trace 将在后续独立模块中实现。
 
 ## 本地安装
 
@@ -35,7 +38,19 @@ py -3.11 -m uv tool install --python 3.11 --editable .
 capycode
 ```
 
-项目名 **CapyCode** 来自 Capability + Code，并与源码包 `capycode`、运行产物目录 `.capy` 保持一致。P0-0 启动后展示品牌、工作区和可用自检命令；完整交互式 Agent 将在 Runtime 与 Textual TUI 模块接入同一入口。
+`capycode` 会直接进入终端交互界面。输入普通文本执行任务，输入 `/` 展开命令菜单。当前提供：
+
+- `/help`：查看命令说明
+- `/config`：填写 Base URL 和 API Key，自动获取模型列表后选择模型
+- `/models`、`/model [model-id]`：查看真实模型列表并打开键盘选择器
+- `/workspace [path]`：查看和切换工作区
+- `/status`、`/clear`、`/quit`：会话控制
+
+Slash Command 菜单支持方向键移动、Tab 补全和 Esc 关闭；普通输入支持方向键查找本次会话的历史任务。`/model` 打开独立模型选择面板，方向键选择、Enter 确认、Esc 取消。
+
+模型请求采用真实 SSE 流式传输：首个 Token 返回前显示轻量思考动画，开始输出后原位更新同一个 Markdown 消息；工具调用显示进行中、成功或失败状态。主界面移除了占用空间的欢迎横幅和 Footer，将终端高度优先留给会话内容。
+
+`/config` 会按照 OpenAI-compatible 协议请求 `<Base URL>/models`。CapyCode 会保存服务端返回的完整模型列表以及当前选择；界面和状态栏只显示真实模型 ID，不显示内部路由别名。直接执行 `/model` 可使用方向键选择模型，Enter 确认，Esc 取消。本地配置保存在 `~/.capycode/settings.json`，不会写入项目仓库；模型环境变量仍作为无本地配置时的兼容回退。项目名 **CapyCode** 来自 Capability + Code，并与源码包 `capycode`、运行产物目录 `.capy` 保持一致。
 
 Linux/WSL：
 
@@ -49,6 +64,12 @@ uv sync --extra dev
 
 ```powershell
 py -3.11 -m uv run capycode --help
+```
+
+直接调试终端界面：
+
+```powershell
+py -3.11 -m uv run capycode
 ```
 
 检查示例配置：

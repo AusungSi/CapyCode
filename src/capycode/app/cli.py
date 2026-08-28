@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 from collections.abc import Sequence
 from pathlib import Path
 
 from capycode import __version__
-from capycode.config.loader import load_configuration
+from capycode.config.loader import DEFAULT_MODELS_PATH, load_configuration
+from capycode.llm import LLMError
+
+from .runtime import execute_task
+from .tui import launch_tui
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -25,6 +30,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="fail when a referenced API or base URL environment variable is missing",
     )
+
+    run = subparsers.add_parser("run", help="run the P0 runtime against a workspace")
+    run.add_argument("task", help="natural-language repository task")
+    run.add_argument("--workspace", type=Path, default=Path.cwd())
+    run.add_argument("--model", default="small", help="model alias from models.yaml")
+    run.add_argument("--models", type=Path, default=DEFAULT_MODELS_PATH)
+    run.add_argument("--max-steps", type=int, default=10)
+
+    tui = subparsers.add_parser("tui", help="open the interactive terminal interface")
+    tui.add_argument("--workspace", type=Path, default=Path.cwd())
+    tui.add_argument("--model", default=None, help="initial model alias")
+    tui.add_argument("--models", type=Path, default=DEFAULT_MODELS_PATH)
     return parser
 
 
@@ -42,11 +59,12 @@ def show_welcome(workspace: Path | None = None) -> int:
     )
     print(f"\nCapyCode {__version__} - Profiled Capability Routing Coding Agent")
     print(f"workspace: {current_workspace}")
-    print("stage: P0-0 project scaffold")
+    print("stage: P0-1 interactive runtime")
     print("\nAvailable now:")
+    print('  capycode run "<task>" --workspace <path> --model <alias>')
     print("  capycode doctor --models <models.yaml> --profiles <profiles.yaml>")
     print("  capycode --help")
-    print("\nInteractive Agent runtime will be enabled in the P0 Runtime/TUI milestones.")
+    print("\nRun capycode without arguments to open the interactive terminal interface.")
     return 0
 
 
@@ -78,18 +96,57 @@ def run_doctor(models_path: Path, profiles_path: Path, *, strict_secrets: bool) 
     return 0
 
 
+async def run_agent(
+    task: str,
+    workspace: Path,
+    model_alias: str,
+    models_path: Path,
+    *,
+    max_steps: int,
+) -> int:
+    state = await execute_task(task, workspace, model_alias, models_path, max_steps)
+
+    if state.final_answer:
+        print(state.final_answer)
+    print(f"session_id: {state.session_id}")
+    print(f"status: {state.status}")
+    print(f"steps: {state.step}")
+    print(f"relevant_files: {', '.join(state.relevant_files) or '-'}")
+    if state.last_error:
+        print(f"error: {state.last_error}")
+    return 0 if state.status == "completed" else 1
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
         if args.command is None:
-            code = show_welcome()
+            launch_tui()
+            code = 0
         elif args.command == "doctor":
             code = run_doctor(args.models, args.profiles, strict_secrets=args.strict_secrets)
+        elif args.command == "run":
+            code = asyncio.run(
+                run_agent(
+                    args.task,
+                    args.workspace,
+                    args.model,
+                    args.models,
+                    max_steps=args.max_steps,
+                )
+            )
+        elif args.command == "tui":
+            launch_tui(
+                workspace=args.workspace,
+                model_alias=args.model,
+                models_path=args.models,
+            )
+            code = 0
         else:
             parser.error(f"unsupported command: {args.command}")
             return
-    except (OSError, ValueError) as exc:
+    except (LLMError, OSError, ValueError) as exc:
         parser.error(str(exc))
         return
     raise SystemExit(code)

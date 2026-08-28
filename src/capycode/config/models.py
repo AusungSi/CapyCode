@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import date
 from typing import Literal
 
@@ -23,6 +24,18 @@ class ModelConfig(StrictConfigModel):
     api_key_env: str = Field(pattern=r"^[A-Z][A-Z0-9_]*$")
     context_window: int = Field(gt=0)
     pricing: PricingConfig
+
+    def resolve_base_url(self) -> str:
+        value = os.getenv(self.base_url_env)
+        if not value:
+            raise ValueError(f"environment variable {self.base_url_env!r} is not set")
+        return value
+
+    def resolve_api_key(self) -> str:
+        value = os.getenv(self.api_key_env)
+        if not value:
+            raise ValueError(f"environment variable {self.api_key_env!r} is not set")
+        return value
 
 
 class ModelRegistryConfig(StrictConfigModel):

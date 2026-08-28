@@ -10,6 +10,7 @@ from pydantic import BaseModel, ValidationError
 from .models import ModelRegistryConfig, ProfileRegistryConfig
 
 ConfigT = TypeVar("ConfigT", bound=BaseModel)
+DEFAULT_MODELS_PATH = Path(__file__).with_name("default_models.yaml")
 
 
 @dataclass(frozen=True)
