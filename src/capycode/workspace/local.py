@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePath, PureWindowsPath
 from typing import Literal
@@ -52,13 +54,22 @@ class LocalWorkspace:
         }
     )
 
-    def __init__(self, root: Path, *, max_read_bytes: int = 1_000_000) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        max_read_bytes: int = 1_000_000,
+        max_write_bytes: int = 1_000_000,
+    ) -> None:
         self.root = root.resolve(strict=True)
         if not self.root.is_dir():
             raise WorkspaceError(f"workspace is not a directory: {self.root}")
         if max_read_bytes <= 0:
             raise ValueError("max_read_bytes must be positive")
+        if max_write_bytes <= 0:
+            raise ValueError("max_write_bytes must be positive")
         self.max_read_bytes = max_read_bytes
+        self.max_write_bytes = max_write_bytes
         self.read_ledger = FileReadLedger()
 
     def resolve_file(self, relative_path: str) -> Path:
@@ -153,6 +164,44 @@ class LocalWorkspace:
             raise WorkspaceError(f"file changed since it was read; read it again: {relative_path}")
         return record
 
+    def write_text(self, relative_path: str, content: str) -> FileReadRecord:
+        path = self.resolve_new_file(relative_path)
+        previous = self.require_fresh_read(relative_path) if path.exists() else None
+        prepared = self._preserve_newlines(content, previous.newline if previous else None)
+        encoding: EncodingName = previous.encoding if previous else "utf-8"
+        raw = prepared.encode(encoding)
+        if len(raw) > self.max_write_bytes:
+            raise WorkspaceError(
+                f"file exceeds write limit: {len(raw)} bytes > {self.max_write_bytes} bytes"
+            )
+        if path.exists() and raw == path.read_bytes():
+            raise WorkspaceError(f"new content is identical to the current file: {relative_path}")
+        self._atomic_write(path, raw)
+        return self._record_read(path, raw, encoding)
+
+    def replace_text(
+        self,
+        relative_path: str,
+        old_text: str,
+        new_text: str,
+        *,
+        replace_all: bool = False,
+    ) -> tuple[FileReadRecord, int]:
+        if old_text == new_text:
+            raise WorkspaceError("old_text and new_text must be different")
+        self.require_fresh_read(relative_path)
+        content = self.read_text_for_search(relative_path)
+        occurrences = content.count(old_text)
+        if occurrences == 0:
+            raise WorkspaceError(f"old_text was not found in file: {relative_path}")
+        if occurrences > 1 and not replace_all:
+            raise WorkspaceError(
+                f"old_text matches {occurrences} locations; set replace_all=true to replace all"
+            )
+        count = occurrences if replace_all else 1
+        updated = content.replace(old_text, new_text, -1 if replace_all else 1)
+        return self.write_text(relative_path, updated), count
+
     def _resolve(self, relative_path: str, *, must_exist: bool) -> Path:
         requested = self._validate_relative_path(relative_path)
         candidate = (self.root / requested).resolve(strict=False)
@@ -184,6 +233,54 @@ class LocalWorkspace:
             return path.read_bytes()
         except OSError as exc:
             raise WorkspaceError(f"unable to read file: {display_path}: {exc}") from exc
+
+    def _record_read(
+        self,
+        path: Path,
+        raw: bytes,
+        encoding: EncodingName,
+    ) -> FileReadRecord:
+        content, _ = self._decode_text(raw, str(path.relative_to(self.root)))
+        stat = path.stat()
+        record = FileReadRecord(
+            path=path,
+            digest=self._digest(raw),
+            modified_ns=stat.st_mtime_ns,
+            size_bytes=len(raw),
+            complete=True,
+            encoding=encoding,
+            newline=self._detect_newline(content),
+        )
+        self.read_ledger.record(record)
+        return record
+
+    @staticmethod
+    def _preserve_newlines(content: str, newline: NewlineStyle | None) -> str:
+        if newline not in {"lf", "crlf", "cr"}:
+            return content
+        normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+        separator = {"lf": "\n", "crlf": "\r\n", "cr": "\r"}[newline]
+        return normalized.replace("\n", separator)
+
+    @staticmethod
+    def _atomic_write(path: Path, raw: bytes) -> None:
+        original_mode = path.stat().st_mode if path.exists() else None
+        descriptor, temporary_name = tempfile.mkstemp(
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(raw)
+                handle.flush()
+                os.fsync(handle.fileno())
+            if original_mode is not None:
+                os.chmod(temporary, original_mode)
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     @staticmethod
     def _decode_text(raw: bytes, display_path: str) -> tuple[str, EncodingName]:
