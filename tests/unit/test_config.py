@@ -13,7 +13,7 @@ def test_example_configuration_loads() -> None:
         Path("config/profiles.example.yaml"),
     )
 
-    assert set(bundle.models.models) == {"model-a", "model-b", "model-c"}
+    assert set(bundle.models.models) == {"model-a", "model-b", "model-c", "model-d"}
     assert bundle.profiles.profiles["retrieval_fast"].model == "model-a"
 
 

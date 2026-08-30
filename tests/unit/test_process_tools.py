@@ -96,6 +96,19 @@ async def test_run_command_allows_inline_python_for_one_shot_checks(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_run_command_explains_that_shell_operators_are_not_argv(tmp_path: Path) -> None:
+    executor = ToolExecutor(ToolRegistry([RunCommandTool()]), LocalWorkspace(tmp_path))
+
+    result = await executor.execute(
+        "run_command", {"argv": [python_name(), "--version", "|", "head", "-1"]}
+    )
+
+    assert result.status == "error"
+    assert "argv array without a shell" in result.content
+    assert "Run separate commands" in result.content
+
+
+@pytest.mark.asyncio
 async def test_run_command_allows_read_only_git_and_rejects_mutating_git(tmp_path: Path) -> None:
     executor = ToolExecutor(ToolRegistry([RunCommandTool()]), LocalWorkspace(tmp_path))
 

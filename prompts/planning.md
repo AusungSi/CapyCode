@@ -1,0 +1,1 @@
+Turn the inspected evidence into a short executable plan. Preserve existing project conventions, identify validation before editing, and do not claim a change is complete until the relevant checks have run.

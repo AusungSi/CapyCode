@@ -4,6 +4,7 @@ import asyncio
 import os
 import secrets
 import shutil
+import sys
 import tempfile
 import time
 from dataclasses import dataclass
@@ -35,6 +36,7 @@ READ_ONLY_GIT_SUBCOMMANDS = frozenset(
     {"--version", "diff", "grep", "log", "ls-files", "rev-parse", "show", "status"}
 )
 SENSITIVE_ENV_MARKERS = ("API_KEY", "AUTHORIZATION", "PASSWORD", "SECRET", "TOKEN")
+SHELL_OPERATOR_ARGUMENTS = frozenset({"|", "||", "&&", ";", "<", ">", ">>", "2>", "2>&1"})
 
 
 @dataclass(frozen=True)
@@ -70,6 +72,7 @@ class CommandRunner:
         *,
         allowed_executables: frozenset[str] | None = None,
         max_stream_characters: int = 20_000,
+        container_image: str | None = None,
     ) -> None:
         if allowed_executables is not None and not allowed_executables:
             raise ValueError("allowed_executables must not be empty")
@@ -81,6 +84,7 @@ class CommandRunner:
             else None
         )
         self.max_stream_characters = max_stream_characters
+        self.container_image = container_image
         self._background: dict[str, BackgroundProcess] = {}
         self._completed: dict[str, ProcessResult] = {}
 
@@ -97,17 +101,55 @@ class CommandRunner:
             raise ValueError("argv must contain non-empty strings")
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
-        executable = self._resolve_executable(argv[0])
+        executable = argv[0] if self.container_image else self._resolve_executable(argv[0])
+        if self.container_image:
+            # Models sometimes echo the container-visible cwd. Translate it
+            # back to the mounted instance workspace before boundary checks.
+            normalized_cwd = cwd.replace("\\", "/")
+            if normalized_cwd == "/workspace" or normalized_cwd.startswith("/workspace/"):
+                normalized_cwd = normalized_cwd[len("/workspace") :].lstrip("/") or "."
+                if normalized_cwd == workspace.root.name or normalized_cwd.startswith(
+                    workspace.root.name + "/"
+                ):
+                    normalized_cwd = normalized_cwd[len(workspace.root.name) :].lstrip("/") or "."
+                cwd = normalized_cwd
         working_directory = workspace.resolve_directory(cwd)
-        self._validate_arguments(argv, workspace, working_directory)
+        self._validate_arguments(
+            argv, workspace, working_directory, allow_container_paths=bool(self.container_image)
+        )
+        if self.container_image:
+            docker = shutil.which("docker")
+            if docker is None:
+                raise WorkspaceError(
+                    "Docker is required for this benchmark environment but was not found on PATH"
+                )
+            relative_cwd = working_directory.relative_to(workspace.root).as_posix()
+            container_cwd = "/workspace" if relative_cwd == "." else f"/workspace/{relative_cwd}"
+            command = [
+                docker,
+                "run",
+                "--rm",
+                "--init",
+                "--pull=never",
+                "--network=bridge",
+                "-v",
+                f"{workspace.root}:/workspace",
+                "-w",
+                container_cwd,
+                self.container_image,
+                *argv,
+            ]
+        else:
+            command = [executable, *argv[1:]]
         temporary_directory = tempfile.TemporaryDirectory(prefix="capycode-process-")
         environment = self._sanitized_environment()
-        environment["PYTHONPYCACHEPREFIX"] = temporary_directory.name
+        environment["PYTHONPYCACHEPREFIX"] = (
+            "/tmp/capycode-pycache" if self.container_image else temporary_directory.name
+        )
         started = time.monotonic()
         try:
             process = await asyncio.create_subprocess_exec(
-                executable,
-                *argv[1:],
+                *command,
                 cwd=working_directory,
                 env=environment,
                 stdin=asyncio.subprocess.DEVNULL,
@@ -214,6 +256,10 @@ class CommandRunner:
         if self.allowed_executables is not None and normalized not in self.allowed_executables:
             choices = ", ".join(sorted(self.allowed_executables))
             raise WorkspaceError(f"executable is not allowed: {requested}; allowed: {choices}")
+        # Test and development commands must use the interpreter running CapyCode.
+        # Resolving ``python`` through PATH can silently select a different Conda install.
+        if normalized in {"py", "python", "python3", "python.exe", "python3.exe"}:
+            return sys.executable
         resolved = shutil.which(requested)
         if resolved is None:
             raise WorkspaceError(f"allowed executable was not found on PATH: {requested}")
@@ -221,7 +267,11 @@ class CommandRunner:
 
     @staticmethod
     def _validate_arguments(
-        argv: list[str], workspace: LocalWorkspace, working_directory: Path
+        argv: list[str],
+        workspace: LocalWorkspace,
+        working_directory: Path,
+        *,
+        allow_container_paths: bool = False,
     ) -> None:
         executable = argv[0].casefold()
         if executable == "git":
@@ -243,12 +293,20 @@ class CommandRunner:
         for index, argument in enumerate(argv[1:], start=1):
             if index in skip_argument_indexes:
                 continue
+            if argument in SHELL_OPERATOR_ARGUMENTS:
+                raise WorkspaceError(
+                    "run_command executes an argv array without a shell; shell operators such as "
+                    f"{argument!r} are not supported. Run separate commands or use a safe "
+                    "program option instead."
+                )
             candidate = (
                 argument.split("=", 1)[1]
                 if argument.startswith("-") and "=" in argument
                 else argument
             )
             if not CommandRunner._looks_like_path(candidate):
+                continue
+            if allow_container_paths and candidate.replace("\\", "/").startswith("/workspace/"):
                 continue
             windows_path = PureWindowsPath(candidate)
             path = Path(candidate)

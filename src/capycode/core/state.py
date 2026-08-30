@@ -33,12 +33,14 @@ class SessionState(BaseModel):
     current_run_id: str | None = None
     last_trace_path: str | None = None
     last_run_input_tokens: int = 0
+    last_run_cached_input_tokens: int = 0
     last_run_output_tokens: int = 0
     last_run_cost: float = 0.0
     last_run_currency: str = ""
     last_run_latency: float = 0.0
     capability_failures: dict[str, int] = Field(default_factory=dict)
     total_input_tokens: int = 0
+    total_cached_input_tokens: int = 0
     total_output_tokens: int = 0
     total_cost: float = 0.0
     total_latency: float = 0.0

@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "task_id": "p0-04",
+  "title": "Isolate request cache instances",
+  "capability": "state and mutation reasoning",
+  "prompt": "Fix RequestCache so independent instances never leak values to each other. Run the existing unittest suite before and after the change, modify only request_cache.py, and inspect the final git diff.",
+  "allowed_modified_files": ["request_cache.py"],
+  "max_steps": 10
+}

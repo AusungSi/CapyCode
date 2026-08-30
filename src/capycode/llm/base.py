@@ -11,6 +11,7 @@ TextDeltaHandler = Callable[[str], Awaitable[None]]
 
 class LLMErrorKind(StrEnum):
     AUTHENTICATION = "authentication"
+    BAD_REQUEST = "bad_request"
     RATE_LIMIT = "rate_limit"
     SERVICE = "service"
     NETWORK = "network"
@@ -18,10 +19,20 @@ class LLMErrorKind(StrEnum):
 
 
 class LLMError(RuntimeError):
-    def __init__(self, kind: LLMErrorKind, message: str, *, retryable: bool) -> None:
+    def __init__(
+        self,
+        kind: LLMErrorKind,
+        message: str,
+        *,
+        retryable: bool,
+        status_code: int | None = None,
+        retry_after_seconds: float | None = None,
+    ) -> None:
         super().__init__(message)
         self.kind = kind
         self.retryable = retryable
+        self.status_code = status_code
+        self.retry_after_seconds = retry_after_seconds
 
 
 class LLMClient(Protocol):

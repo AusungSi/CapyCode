@@ -19,6 +19,7 @@ def test_user_settings_use_real_model_ids_and_per_model_pricing(tmp_path: Path) 
     store.configure_pricing(
         "demo-model",
         input_per_million=2,
+        cached_input_per_million=0.5,
         output_per_million=8,
         currency="cny",
         snapshot_date=date(2026, 8, 28),
@@ -33,6 +34,7 @@ def test_user_settings_use_real_model_ids_and_per_model_pricing(tmp_path: Path) 
     assert resolved.base_url == "https://example.test/v1"
     assert resolved.api_key == "local-secret"
     assert resolved.input_per_million == 2
+    assert resolved.cached_input_per_million == 0.5
     assert resolved.output_per_million == 8
     assert resolved.currency == "CNY"
     assert resolved.context_window == 200_000
@@ -101,3 +103,64 @@ def test_user_settings_file_is_valid_json(tmp_path: Path) -> None:
     assert payload["schema_version"] == 2
     assert payload["default_model"] == "demo-model"
     assert payload["endpoint"]["api_key"] == "local-secret"
+
+
+def test_named_endpoints_are_independently_selectable_and_priced(tmp_path: Path) -> None:
+    store = UserSettingsStore(tmp_path / "settings.json")
+    store.configure_endpoint(
+        endpoint_id="openai",
+        model="gpt-a",
+        base_url="https://one.example/v1",
+        api_key="key-one",
+        available_models=["gpt-a"],
+    )
+    store.configure_pricing(
+        "gpt-a",
+        input_per_million=1,
+        output_per_million=2,
+        currency="USD",
+        cached_input_per_million=0.25,
+        snapshot_date=date(2026, 8, 29),
+        context_window=1000,
+    )
+    store.configure_endpoint(
+        endpoint_id="gateway",
+        model="gpt-a",
+        base_url="https://two.example/v1",
+        api_key="key-two",
+        available_models=["gpt-a", "gpt-b"],
+    )
+    store.configure_pricing(
+        "gpt-a",
+        input_per_million=3,
+        output_per_million=4,
+        currency="CNY",
+        snapshot_date=date(2026, 8, 29),
+        context_window=2000,
+    )
+
+    settings = store.load()
+    first = resolve_model("gpt-a", settings, "openai")
+    second = resolve_model("gpt-a", settings, "gateway")
+    assert first.base_url == "https://one.example/v1"
+    assert first.api_key == "key-one"
+    assert first.input_per_million == 1
+    assert first.cached_input_per_million == 0.25
+    assert second.base_url == "https://two.example/v1"
+    assert second.api_key == "key-two"
+    assert second.input_per_million == 3
+
+    selected = store.select_endpoint("openai")
+    assert selected.default_endpoint == "openai"
+    assert selected.default_model == "gpt-a"
+
+    remaining = store.delete_endpoint("gateway")
+    assert "gateway" not in remaining.endpoints
+    assert remaining.default_endpoint == "openai"
+    assert remaining.endpoint is not None
+    assert remaining.endpoint.base_url == "https://one.example/v1"
+
+    empty = store.delete_endpoint("openai")
+    assert empty.default_endpoint is None
+    assert empty.default_model is None
+    assert empty.endpoint is None

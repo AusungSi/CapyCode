@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "task_id": "p0-03",
+  "title": "Reserve the final inventory units",
+  "capability": "multi-file contract tracing",
+  "prompt": "Fix the inventory reservation behavior while preserving the Product contract. Inspect the package, run the existing unittest suite before and after the change, modify only inventory/service.py, and inspect the final git diff.",
+  "allowed_modified_files": ["inventory/service.py"],
+  "max_steps": 12
+}

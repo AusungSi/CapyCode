@@ -13,6 +13,7 @@ class StrictConfigModel(BaseModel):
 
 class PricingConfig(StrictConfigModel):
     input_per_million: float = Field(ge=0)
+    cached_input_per_million: float | None = Field(default=None, ge=0)
     output_per_million: float = Field(ge=0)
     snapshot_date: date
 

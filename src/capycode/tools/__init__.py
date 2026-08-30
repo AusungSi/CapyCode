@@ -14,8 +14,8 @@ from .stop_process import StopProcessTool
 from .write_file import WriteFileTool
 
 
-def build_p0_runtime_tools() -> ToolRegistry:
-    command_runner = CommandRunner()
+def build_p0_runtime_tools(*, container_image: str | None = None) -> ToolRegistry:
+    command_runner = CommandRunner(container_image=container_image)
     git_runner = CommandRunner(allowed_executables=frozenset({"git"}))
     return ToolRegistry(
         [

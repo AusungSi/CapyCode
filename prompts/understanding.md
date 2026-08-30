@@ -1,0 +1,1 @@
+Identify the user's intent, constraints, and the files most likely to contain the relevant behavior. State uncertainty explicitly, inspect before changing code, and keep the next action narrowly scoped.
