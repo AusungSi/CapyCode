@@ -4,7 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from capycode.config.models import ProfileConfig, ProfileRegistryConfig
-from capycode.llm.types import DEFAULT_MAX_OUTPUT_TOKENS
+from capycode.llm.types import DEFAULT_MAX_OUTPUT_TOKENS, ReasoningEffort
 
 from .models import Capability
 
@@ -19,6 +19,7 @@ class Profile:
     context_policy: str
     max_output_tokens: int
     max_steps: int
+    reasoning_effort: ReasoningEffort | None = None
 
     @classmethod
     def from_config(cls, profile_id: str, config: ProfileConfig) -> Profile:
@@ -31,6 +32,7 @@ class Profile:
             context_policy=config.context_policy,
             max_output_tokens=config.budget.max_output_tokens,
             max_steps=config.budget.max_steps,
+            reasoning_effort=config.reasoning_effort,
         )
 
 
@@ -85,6 +87,26 @@ class ProfileRegistry:
         return ProfileRegistry(
             {
                 profile_id: replace(profile, model_ref=overrides.get(profile_id, profile.model_ref))
+                for profile_id, profile in self._profiles.items()
+            }
+        )
+
+    def with_routing_overrides(
+        self,
+        overrides: dict[str, tuple[str, ReasoningEffort | None]],
+    ) -> ProfileRegistry:
+        """Apply the model and reasoning effort recorded for measured profile choices."""
+        return ProfileRegistry(
+            {
+                profile_id: replace(
+                    profile,
+                    model_ref=overrides.get(
+                        profile_id, (profile.model_ref, profile.reasoning_effort)
+                    )[0],
+                    reasoning_effort=overrides.get(
+                        profile_id, (profile.model_ref, profile.reasoning_effort)
+                    )[1],
+                )
                 for profile_id, profile in self._profiles.items()
             }
         )

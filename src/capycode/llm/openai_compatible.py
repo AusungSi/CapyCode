@@ -233,6 +233,8 @@ class OpenAICompatibleLLM:
         }
         if not request.tools:
             payload.pop("tools")
+        if request.reasoning_effort is not None:
+            payload["reasoning_effort"] = request.reasoning_effort
         return payload
 
     async def list_models(self) -> list[str]:

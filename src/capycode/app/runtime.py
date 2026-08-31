@@ -114,9 +114,12 @@ async def execute_task(
                     "profiled routing artifact references models not exposed by the current "
                     "endpoint: " + ", ".join(unavailable)
                 )
-            registry = registry.with_model_overrides(
+            registry = registry.with_routing_overrides(
                 {
-                    selection.profile_id: selection.model_id
+                    selection.profile_id: (
+                        selection.model_id,
+                        selection.reasoning_effort,
+                    )
                     for selection in profiled_routing.selected_by_capability.values()
                 }
             )

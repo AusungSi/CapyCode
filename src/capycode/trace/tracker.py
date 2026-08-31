@@ -184,6 +184,7 @@ class RunTracker:
         tools: list[ToolCallTrace],
         capability: str | None = None,
         profile_id: str | None = None,
+        reasoning_effort: str | None = None,
         escalation_level: int = 0,
         model_id: str | None = None,
         route_reason: str | None = None,
@@ -218,6 +219,7 @@ class RunTracker:
                 retry_count=0,
                 capability=capability,
                 profile_id=profile_id,
+                reasoning_effort=reasoning_effort,
                 escalation_level=escalation_level,
                 tools=tools,
             )

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -8,6 +8,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # escalate a truncated request to 64K. Keep the same limits for coding runs.
 DEFAULT_MAX_OUTPUT_TOKENS = 32_000
 MAX_OUTPUT_TOKENS_UPPER_LIMIT = 64_000
+
+ReasoningEffort: TypeAlias = Literal[
+    "none", "minimal", "low", "medium", "high", "xhigh"
+]
 
 
 class RuntimeModel(BaseModel):
@@ -48,6 +52,7 @@ class LLMRequest(RuntimeModel):
     tools: list[ToolDefinition] = Field(default_factory=list)
     temperature: float = 0.0
     max_output_tokens: int = Field(default=DEFAULT_MAX_OUTPUT_TOKENS, gt=0)
+    reasoning_effort: ReasoningEffort | None = None
 
 
 class Usage(RuntimeModel):

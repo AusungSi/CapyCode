@@ -1,0 +1,60 @@
+profiles:
+  retrieval_qwen:
+    capability: repository_retrieval
+    model: qwen-fast
+    instruction: prompts/retrieval.md
+    tools: [list_files, search_code, read_file, write_file, replace_text, run_tests, run_command, git_diff]
+    context_policy: retrieval
+    budget:
+      max_output_tokens: 32000
+      max_steps: 10
+
+  understanding_qwen:
+    capability: code_understanding
+    model: qwen-fast
+    instruction: prompts/understanding.md
+    tools: [list_files, search_code, read_file, write_file, replace_text, run_tests, run_command, git_diff]
+    context_policy: retrieval
+    budget:
+      max_output_tokens: 32000
+      max_steps: 10
+
+  planning_deepseek:
+    capability: task_planning
+    model: deepseek-pro
+    instruction: prompts/planning.md
+    tools: [list_files, search_code, read_file, write_file, replace_text, run_tests, run_command, git_diff]
+    context_policy: full
+    budget:
+      max_output_tokens: 32000
+      max_steps: 10
+
+  editing_deepseek:
+    capability: code_editing
+    model: deepseek-pro
+    instruction: prompts/editing.md
+    tools: [list_files, search_code, read_file, write_file, replace_text, run_tests, run_command, git_diff]
+    context_policy: full
+    budget:
+      max_output_tokens: 32000
+      max_steps: 10
+
+  verification_deepseek:
+    capability: verification
+    model: deepseek-pro
+    instruction: prompts/verification.md
+    tools: [list_files, search_code, read_file, write_file, replace_text, run_tests, run_command, git_diff]
+    context_policy: diagnosis
+    budget:
+      max_output_tokens: 32000
+      max_steps: 10
+
+  diagnosis_deepseek:
+    capability: failure_diagnosis
+    model: deepseek-pro
+    instruction: prompts/diagnosis.md
+    tools: [list_files, search_code, read_file, write_file, replace_text, run_tests, run_command, git_diff]
+    context_policy: diagnosis
+    budget:
+      max_output_tokens: 32000
+      max_steps: 10

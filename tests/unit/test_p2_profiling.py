@@ -79,6 +79,39 @@ def test_profiled_artifact_selects_reliable_lowest_expected_cost_candidate() -> 
     assert artifact.metrics[0].efficiency == 1.0
 
 
+def test_profiled_artifact_does_not_trade_away_quality_beyond_tolerance() -> None:
+    measurements = [
+        ProfileMeasurement(
+            profile_id="cheap",
+            capability=Capability.EDITING,
+            model_id="cheap-model",
+            succeeded=index < 8,
+            cost=0.1,
+            latency_seconds=1,
+        )
+        for index in range(10)
+    ] + [
+        ProfileMeasurement(
+            profile_id="quality",
+            capability=Capability.EDITING,
+            model_id="quality-model",
+            succeeded=True,
+            cost=1,
+            latency_seconds=2,
+        )
+        for _ in range(10)
+    ]
+
+    artifact = ProfiledRoutingArtifact.from_measurements(
+        measurements,
+        minimum_samples=5,
+        reliability_threshold=0.6,
+        quality_tolerance=0.05,
+    )
+
+    assert artifact.selection_for(Capability.EDITING).profile_id == "quality"
+
+
 def test_profiled_router_uses_selected_measured_profile(tmp_path: Path) -> None:
     artifact = ProfiledRoutingArtifact.from_measurements(
         [
@@ -165,8 +198,15 @@ def test_measurements_are_extracted_from_step_trace_and_terminal_result(tmp_path
         currency="USD",
         capability=Capability.EDITING.value,
         profile_id="editing",
+        reasoning_effort="low",
     )
-    trace.write_text(event.model_dump_json() + "\n", encoding="utf-8")
+    second_event = event.model_copy(
+        update={"event_id": "b" * 32, "sequence": 2, "step": 2, "cost": 0.1, "latency_seconds": 0.2}
+    )
+    trace.write_text(
+        event.model_dump_json() + "\n" + second_event.model_dump_json() + "\n",
+        encoding="utf-8",
+    )
     now = datetime.now(UTC)
     run = GateRunResult(
         task_id="p0-01",
@@ -215,9 +255,10 @@ def test_measurements_are_extracted_from_step_trace_and_terminal_result(tmp_path
             profile_id="editing",
             capability=Capability.EDITING,
             model_id="measured-model",
+            reasoning_effort="low",
             succeeded=True,
-            cost=0.25,
-            latency_seconds=0.5,
+            cost=0.35,
+            latency_seconds=0.7,
         )
     ]
 

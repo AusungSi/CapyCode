@@ -64,6 +64,7 @@ async def test_openai_compatible_tool_call_mapping() -> None:
             LLMRequest(
                 model="test-model",
                 messages=[Message(role="user", content="Read the README")],
+                reasoning_effort="high",
                 tools=[
                     ToolDefinition(
                         name="read_file",
@@ -82,6 +83,7 @@ async def test_openai_compatible_tool_call_mapping() -> None:
     assert isinstance(body, dict)
     assert body["model"] == "test-model"
     assert body["max_tokens"] == 32_000
+    assert body["reasoning_effort"] == "high"
     assert body["tools"][0]["function"]["name"] == "read_file"
     assert response.tool_calls[0].arguments == {"path": "README.md"}
     assert response.usage.input_tokens == 12

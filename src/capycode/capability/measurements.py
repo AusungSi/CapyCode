@@ -12,6 +12,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from capycode.llm.types import ReasoningEffort
+
 from .models import Capability
 
 
@@ -20,11 +22,12 @@ class MeasurementModel(BaseModel):
 
 
 class ProfileMeasurement(MeasurementModel):
-    """One routed step, labelled with its final task outcome."""
+    """One run-capability observation, labelled with its final task outcome."""
 
     profile_id: str = Field(min_length=1)
     capability: Capability
     model_id: str = Field(min_length=1)
+    reasoning_effort: ReasoningEffort | None = None
     succeeded: bool
     cost: float = Field(ge=0)
     latency_seconds: float = Field(ge=0)
@@ -34,6 +37,7 @@ class ProfileMetric(MeasurementModel):
     profile_id: str = Field(min_length=1)
     capability: Capability
     model_id: str = Field(min_length=1)
+    reasoning_effort: ReasoningEffort | None = None
     samples: int = Field(ge=1)
     successes: int = Field(ge=0)
     success_rate: float = Field(ge=0, le=1)
@@ -46,6 +50,7 @@ class ProfileMetric(MeasurementModel):
 class ProfileSelection(MeasurementModel):
     profile_id: str = Field(min_length=1)
     model_id: str = Field(min_length=1)
+    reasoning_effort: ReasoningEffort | None = None
     capability: Capability
     samples: int = Field(ge=1)
     success_rate: float = Field(ge=0, le=1)
@@ -61,6 +66,7 @@ class ProfiledRoutingArtifact(MeasurementModel):
     generated_at: datetime
     minimum_samples: int = Field(ge=1)
     reliability_threshold: float = Field(ge=0, le=1)
+    quality_tolerance: float = Field(default=0.05, ge=0, le=1)
     metrics: tuple[ProfileMetric, ...]
     selected_by_capability: dict[str, ProfileSelection] = Field(default_factory=dict)
     training_task_fingerprints: dict[str, str] = Field(default_factory=dict)
@@ -77,6 +83,7 @@ class ProfiledRoutingArtifact(MeasurementModel):
         *,
         minimum_samples: int = 2,
         reliability_threshold: float = 0.6,
+        quality_tolerance: float = 0.05,
         source_campaign_id: str | None = None,
         candidate_model_ids: Iterable[str] = (),
     ) -> ProfiledRoutingArtifact:
@@ -84,14 +91,24 @@ class ProfiledRoutingArtifact(MeasurementModel):
             raise ValueError("minimum_samples must be positive")
         if not 0 <= reliability_threshold <= 1:
             raise ValueError("reliability_threshold must be between 0 and 1")
-        grouped: dict[tuple[str, Capability, str], list[ProfileMeasurement]] = defaultdict(list)
+        if not 0 <= quality_tolerance <= 1:
+            raise ValueError("quality_tolerance must be between 0 and 1")
+        grouped: dict[
+            tuple[str, Capability, str, ReasoningEffort | None], list[ProfileMeasurement]
+        ] = defaultdict(list)
         for measurement in measurements:
-            grouped[(measurement.profile_id, measurement.capability, measurement.model_id)].append(
-                measurement
-            )
+            grouped[
+                (
+                    measurement.profile_id,
+                    measurement.capability,
+                    measurement.model_id,
+                    measurement.reasoning_effort,
+                )
+            ].append(measurement)
         metrics: list[ProfileMetric] = []
-        for (profile_id, capability, model_id), samples in sorted(
-            grouped.items(), key=lambda item: (item[0][1].value, item[0][0], item[0][2])
+        for (profile_id, capability, model_id, reasoning_effort), samples in sorted(
+            grouped.items(),
+            key=lambda item: (item[0][1].value, item[0][0], item[0][2], item[0][3] or ""),
         ):
             count = len(samples)
             successes = sum(sample.succeeded for sample in samples)
@@ -102,6 +119,7 @@ class ProfiledRoutingArtifact(MeasurementModel):
                     profile_id=profile_id,
                     capability=capability,
                     model_id=model_id,
+                    reasoning_effort=reasoning_effort,
                     samples=count,
                     successes=successes,
                     success_rate=success_rate,
@@ -123,8 +141,16 @@ class ProfiledRoutingArtifact(MeasurementModel):
             ]
             if not eligible:
                 continue
+            best_success_rate = max(metric.success_rate for metric in eligible)
+            quality_floor = max(
+                reliability_threshold,
+                best_success_rate - quality_tolerance,
+            )
+            quality_competitive = [
+                metric for metric in eligible if metric.success_rate >= quality_floor
+            ]
             winner = min(
-                eligible,
+                quality_competitive,
                 key=lambda item: (
                     item.expected_cost_per_success or math.inf,
                     item.mean_latency_seconds,
@@ -135,6 +161,7 @@ class ProfiledRoutingArtifact(MeasurementModel):
             selected[capability.value] = ProfileSelection(
                 profile_id=winner.profile_id,
                 model_id=winner.model_id,
+                reasoning_effort=winner.reasoning_effort,
                 capability=winner.capability,
                 samples=winner.samples,
                 success_rate=winner.success_rate,
@@ -146,6 +173,7 @@ class ProfiledRoutingArtifact(MeasurementModel):
             generated_at=datetime.now(UTC),
             minimum_samples=minimum_samples,
             reliability_threshold=reliability_threshold,
+            quality_tolerance=quality_tolerance,
             metrics=tuple(metrics),
             selected_by_capability=selected,
             source_campaign_id=source_campaign_id,

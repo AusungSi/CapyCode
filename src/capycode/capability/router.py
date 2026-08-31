@@ -32,9 +32,7 @@ class ProfileRouter:
         candidates = self.registry.for_capability(decision.capability)
         if preferred_profile_id:
             preferred = self.registry.get(preferred_profile_id)
-            if preferred is not None and (
-                preferred.capability == decision.capability or state.last_error
-            ):
+            if preferred is not None and preferred.capability == decision.capability:
                 candidates = [preferred]
         if not candidates and self.default_profile_id:
             default = self.registry.get(self.default_profile_id)

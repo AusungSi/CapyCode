@@ -116,6 +116,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     swebench.add_argument("--output", type=Path, default=None)
     swebench.add_argument("--container-image", default=DEFAULT_SWEBENCH_CONTAINER_IMAGE)
+    swebench.add_argument("--profiles", type=Path, default=Path("config/profiles.yaml"))
+    swebench.add_argument("--profiled-artifact", type=Path, default=None)
     p0_benchmark.add_argument("--output", type=Path, default=None)
     p0_benchmark.add_argument(
         "--validate-only",
@@ -135,6 +137,7 @@ def build_parser() -> argparse.ArgumentParser:
     p0_profile.add_argument("--output", type=Path, default=None)
     p0_profile.add_argument("--minimum-samples", type=int, default=2)
     p0_profile.add_argument("--reliability-threshold", type=float, default=0.6)
+    p0_profile.add_argument("--quality-tolerance", type=float, default=0.05)
     p0_profile.add_argument("--profiles", type=Path, default=Path("config/profiles.yaml"))
     p0_profile.add_argument(
         "--install",
@@ -365,10 +368,23 @@ async def run_swebench(
     max_concurrency: int,
     output: Path | None,
     container_image: str = DEFAULT_SWEBENCH_CONTAINER_IMAGE,
+    profiles_path: Path = Path("config/profiles.yaml"),
+    profiled_artifact: Path | None = None,
 ) -> int:
     settings_store = UserSettingsStore()
     selected = resolve_model(model_id, settings_store.load(), endpoint_id)
+    from capycode.capability import ProfiledRoutingArtifact
     from capycode.profiling import SWEbenchRunner
+
+    if profiled_artifact is not None:
+        if not await asyncio.to_thread(profiled_artifact.is_file):
+            raise ValueError(f"profiled routing artifact does not exist: {profiled_artifact}")
+        routing = await asyncio.to_thread(ProfiledRoutingArtifact.load, profiled_artifact)
+        _require_configured_models(
+            [selection.model_id for selection in routing.selected_by_capability.values()],
+            settings_store,
+            endpoint_id,
+        )
 
     runner = SWEbenchRunner(output_root=output, progress=print)
     tasks = SWEbenchRunner.load_tasks(instances)
@@ -382,6 +398,8 @@ async def run_swebench(
             steps,
             settings_store=settings_store,
             endpoint_id=endpoint_id,
+            profiles_path=profiles_path,
+            profiled_routing_path=profiled_artifact,
             profile_step_limit=steps,
             container_image=container_image,
         )
@@ -449,6 +467,7 @@ async def run_p2_profile(
     output: Path | None,
     minimum_samples: int,
     reliability_threshold: float,
+    quality_tolerance: float,
     profiles_path: Path,
     install: bool,
     endpoint_id: str | None = None,
@@ -485,6 +504,7 @@ async def run_p2_profile(
         task_ids=task_ids,
         minimum_samples=minimum_samples,
         reliability_threshold=reliability_threshold,
+        quality_tolerance=quality_tolerance,
     )
     print(f"campaign: {report.campaign_id}")
     print(f"step measurements: {report.measurements}")
@@ -559,7 +579,10 @@ async def run_p2_evaluation(
             },
             allow_overlap=allow_overlap,
         )
-    initial_model = settings_store.load().default_model
+    # A profiled run must create its client from the selected endpoint. The
+    # user's global default may belong to a different endpoint and cause 401s
+    # before the capability-level model overrides are applied.
+    initial_model = fixed_models[0] if fixed_models else settings_store.load().default_model
 
     def executor_factory(strategy: EvaluationStrategy) -> TaskExecutor:
         async def execute_evaluation_task(
@@ -677,6 +700,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                     max_concurrency=args.max_concurrency,
                     output=args.output,
                     container_image=args.container_image,
+                    profiles_path=args.profiles,
+                    profiled_artifact=args.profiled_artifact,
                 )
             )
         elif args.command == "profile" and args.profile_command == "p0":
@@ -688,6 +713,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                     output=args.output,
                     minimum_samples=args.minimum_samples,
                     reliability_threshold=args.reliability_threshold,
+                    quality_tolerance=args.quality_tolerance,
                     profiles_path=args.profiles,
                     install=args.install,
                     endpoint_id=args.endpoint,

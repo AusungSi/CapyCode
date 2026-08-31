@@ -26,8 +26,6 @@ class EscalationPolicy:
             if p.profile_id != profile_id
             and (current is None or p.capability == current.capability)
         ]
-        if not profiles:
-            profiles = [p for p in self.registry.all() if p.profile_id != profile_id]
         if profiles:
             next_profile = max(profiles, key=lambda p: (p.max_output_tokens, p.profile_id))
             return EscalationDecision(
@@ -36,5 +34,6 @@ class EscalationPolicy:
                 next_profile_id=next_profile.profile_id,
             )
         return EscalationDecision(
-            action=EscalationAction.FAIL, reason="no escalation profile available"
+            action=EscalationAction.RETRY,
+            reason="no same-capability escalation profile; retaining current profile",
         )

@@ -45,6 +45,7 @@ class ProfilingCampaignReport(ExperimentModel):
     repeats: int = Field(ge=1)
     minimum_samples: int = Field(ge=1)
     reliability_threshold: float = Field(ge=0, le=1)
+    quality_tolerance: float = Field(ge=0, le=1)
     measurements: int = Field(ge=0)
     selected_capabilities: int = Field(ge=0)
     campaigns: list[ProfileCampaign]
@@ -120,7 +121,12 @@ def _safe_model_directory(model_id: str, position: int) -> str:
 
 
 def measurements_from_report(report: GateCampaignReport) -> list[ProfileMeasurement]:
-    """Read redacted step traces and label each routed step with task success."""
+    """Aggregate routed steps per run/capability and label them with task success.
+
+    Counting every step as an independent sample rewards long trajectories and
+    overstates confidence. A run contributes at most one observation for each
+    profile/model/effort/capability tuple.
+    """
     measurements: list[ProfileMeasurement] = []
     for result in report.results:
         if not result.trace_path:
@@ -130,6 +136,7 @@ def measurements_from_report(report: GateCampaignReport) -> list[ProfileMeasurem
             lines = trace_path.read_text(encoding="utf-8").splitlines()
         except OSError as exc:
             raise ValueError(f"unable to read profiling trace {trace_path}: {exc}") from exc
+        aggregated: dict[tuple[str, Capability, str, str | None], tuple[float, float]] = {}
         for line in lines:
             if not line.strip():
                 continue
@@ -138,14 +145,27 @@ def measurements_from_report(report: GateCampaignReport) -> list[ProfileMeasurem
                 continue
             if event.profile_id is None or event.capability is None:
                 continue
+            key = (
+                event.profile_id,
+                Capability(event.capability),
+                event.model_id,
+                event.reasoning_effort,
+            )
+            cost, latency = aggregated.get(key, (0.0, 0.0))
+            aggregated[key] = (cost + event.cost, latency + event.latency_seconds)
+        for (profile_id, capability, model_id, reasoning_effort), (
+            cost,
+            latency,
+        ) in aggregated.items():
             measurements.append(
                 ProfileMeasurement(
-                    profile_id=event.profile_id,
-                    capability=Capability(event.capability),
-                    model_id=event.model_id,
+                    profile_id=profile_id,
+                    capability=capability,
+                    model_id=model_id,
+                    reasoning_effort=reasoning_effort,
                     succeeded=result.status == "passed",
-                    cost=event.cost,
-                    latency_seconds=event.latency_seconds,
+                    cost=cost,
+                    latency_seconds=latency,
                 )
             )
     return measurements
@@ -174,6 +194,7 @@ class P2ProfilingRunner:
         task_ids: Sequence[str] | None = None,
         minimum_samples: int = 2,
         reliability_threshold: float = 0.6,
+        quality_tolerance: float = 0.05,
     ) -> tuple[ProfilingCampaignReport, ProfiledRoutingArtifact, Path]:
         selected_models = list(dict.fromkeys(item.strip() for item in model_ids if item.strip()))
         if not selected_models:
@@ -239,6 +260,7 @@ class P2ProfilingRunner:
                     all_measurements,
                     minimum_samples=minimum_samples,
                     reliability_threshold=reliability_threshold,
+                    quality_tolerance=quality_tolerance,
                     source_campaign_id=campaign_id,
                     candidate_model_ids=selected_models,
                 ).model_copy(update={"training_task_fingerprints": task_fingerprints})
@@ -270,6 +292,7 @@ class P2ProfilingRunner:
             all_measurements,
             minimum_samples=minimum_samples,
             reliability_threshold=reliability_threshold,
+            quality_tolerance=quality_tolerance,
             source_campaign_id=campaign_id,
             candidate_model_ids=selected_models,
         )
@@ -283,6 +306,7 @@ class P2ProfilingRunner:
             repeats=repeats,
             minimum_samples=minimum_samples,
             reliability_threshold=reliability_threshold,
+            quality_tolerance=quality_tolerance,
             measurements=len(all_measurements),
             selected_capabilities=len(artifact.selected_by_capability),
             campaigns=campaigns,
@@ -347,6 +371,7 @@ class P2ProfilingRunner:
                 "capability",
                 "profile_id",
                 "model_id",
+                "reasoning_effort",
                 "samples",
                 "successes",
                 "success_rate",
@@ -367,6 +392,7 @@ class P2ProfilingRunner:
                     metric.capability.value,
                     metric.profile_id,
                     metric.model_id,
+                    metric.reasoning_effort or "default",
                     metric.samples,
                     metric.successes,
                     f"{metric.success_rate:.6f}",
@@ -392,17 +418,22 @@ class P2ProfilingRunner:
                 f"- Selection: at least {report.minimum_samples} samples and success rate >= "
                 f"{report.reliability_threshold:.0%}"
             ),
-            "- Ranking: lowest expected step cost per success, then latency.",
+            (
+                "- Ranking: keep profiles within "
+                f"{report.quality_tolerance:.0%} of the best success rate, then choose the "
+                "lowest expected cost per success and latency."
+            ),
             (
                 "- Step outcomes are labelled with the final P0 task result; this is not an "
                 "independent causal estimate."
             ),
             "",
             (
-                "| Capability | Profile | Model | n | Success | Mean cost | Mean latency | "
+                "| Capability | Profile | Model | Effort | n | Success | Mean cost | "
+                "Mean latency | "
                 "Expected cost / success | Efficiency | Selected |"
             ),
-            "|---|---|---|---:|---:|---:|---:|---:|---:|---|",
+            "|---|---|---|---|---:|---:|---:|---:|---:|---:|---|",
         ]
         selected_keys = {
             (item.capability, item.profile_id, item.model_id)
@@ -422,6 +453,7 @@ class P2ProfilingRunner:
             )
             lines.append(
                 f"| {metric.capability.value} | {metric.profile_id} | {metric.model_id} | "
+                f"{metric.reasoning_effort or 'default'} | "
                 f"{metric.samples} | {metric.success_rate:.1%} | {metric.mean_cost:.6f} | "
                 f"{metric.mean_latency_seconds:.3f}s | "
                 f"{expected_cost} | {efficiency} | {selected_label} |"

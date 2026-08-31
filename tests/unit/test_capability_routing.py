@@ -7,8 +7,10 @@ import pytest
 from capycode.app.runtime import load_profile_instruction
 from capycode.capability import (
     Capability,
+    CapabilityDecision,
     CapabilityDetector,
     ContextBuilder,
+    EscalationAction,
     EscalationPolicy,
     Profile,
     ProfileRegistry,
@@ -45,6 +47,18 @@ def test_default_profile_registry_keys_match_profile_ids() -> None:
     registry = build_default_profile_registry()
     for profile in registry.all():
         assert registry.get(profile.profile_id) is profile
+
+
+def test_profile_registry_applies_model_and_reasoning_overrides() -> None:
+    configured = registry()
+
+    overridden = configured.with_routing_overrides(
+        {"retrieval_fast": ("fast-model", "low")}
+    )
+
+    assert overridden.get("retrieval_fast").model_ref == "fast-model"
+    assert overridden.get("retrieval_fast").reasoning_effort == "low"
+    assert overridden.get("editing_balanced").reasoning_effort is None
 
 
 def test_example_profile_instruction_paths_load_prompt_content() -> None:
@@ -94,6 +108,36 @@ def test_router_rejects_missing_capability_profile(tmp_path: Path) -> None:
         ProfileRouter(ProfileRegistry({"retrieval_fast": retrieval})).select(
             CapabilityDetector().detect(state), state
         )
+
+
+def test_router_ignores_cross_capability_preference_after_error(tmp_path: Path) -> None:
+    configured = registry()
+    state = SessionState(workspace=str(tmp_path), task="Diagnose the failed test")
+    state.last_error = "test failed"
+
+    route = ProfileRouter(configured).select(
+        CapabilityDecision(capability=Capability.DIAGNOSIS, confidence=1.0),
+        state,
+        preferred_profile_id="verification_fast",
+    )
+
+    assert route.capability == Capability.DIAGNOSIS
+    assert route.profile_id == "diagnosis_deep"
+
+
+def test_escalation_does_not_switch_across_capabilities(tmp_path: Path) -> None:
+    configured = registry()
+    state = SessionState(workspace=str(tmp_path), task="Fix the failed test", retry_count=1)
+
+    escalation = EscalationPolicy(configured, max_retries=0).decide(
+        state,
+        "diagnosis_deep",
+        failed=True,
+    )
+
+    assert escalation.action == EscalationAction.RETRY
+    assert escalation.next_profile_id is None
+    assert "same-capability" in escalation.reason
 
 
 def test_context_builder_filters_tools_and_history(tmp_path: Path) -> None:
@@ -263,7 +307,7 @@ async def test_runtime_rejects_tool_outside_active_profile(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_runtime_switches_profile_after_tool_failure(tmp_path: Path) -> None:
+async def test_runtime_routes_tool_failure_to_diagnosis_profile(tmp_path: Path) -> None:
     primary = Profile(
         profile_id="retrieval_primary",
         capability=Capability.RETRIEVAL,
@@ -273,16 +317,18 @@ async def test_runtime_switches_profile_after_tool_failure(tmp_path: Path) -> No
         context_policy="retrieval",
         max_output_tokens=1024,
         max_steps=2,
+        reasoning_effort="low",
     )
     backup = Profile(
-        profile_id="retrieval_backup",
-        capability=Capability.RETRIEVAL,
+        profile_id="diagnosis_backup",
+        capability=Capability.DIAGNOSIS,
         model_ref="backup-model",
-        instruction="Retrieve repository context with a fallback model.",
+        instruction="Diagnose the failed retrieval with a stronger model.",
         tools=frozenset({"read_file"}),
         context_policy="retrieval",
         max_output_tokens=2048,
         max_steps=2,
+        reasoning_effort="high",
     )
     client = ScriptedLLM(
         [
@@ -318,7 +364,8 @@ async def test_runtime_switches_profile_after_tool_failure(tmp_path: Path) -> No
     assert state.final_answer == "recovered"
     assert state.retry_count == 1
     assert [request.model for request in client.requests] == ["primary-model", "backup-model"]
-    assert state.current_profile == "retrieval_backup"
+    assert [request.reasoning_effort for request in client.requests] == ["low", "high"]
+    assert state.current_profile == "diagnosis_backup"
 
 
 @pytest.mark.asyncio

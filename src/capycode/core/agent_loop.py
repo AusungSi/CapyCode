@@ -149,6 +149,7 @@ class AgentRuntime:
                 escalation_level = 0
                 request_model = model
                 request_max_output_tokens = self.max_output_tokens
+                request_reasoning_effort = None
                 request_messages = state.history
                 request_tools = self.tools.definitions()
                 if self.capability_detector is not None and self.profile_router is not None:
@@ -182,6 +183,7 @@ class AgentRuntime:
                     request_max_output_tokens = min(
                         self.max_output_tokens, profile.max_output_tokens
                     )
+                    request_reasoning_effort = profile.reasoning_effort
                     request_messages, request_tools = self.context_builder.build(
                         state, profile, request_tools
                     )
@@ -215,6 +217,7 @@ class AgentRuntime:
                             messages=request_messages,
                             tools=request_tools,
                             max_output_tokens=request_max_output_tokens,
+                            reasoning_effort=request_reasoning_effort,
                         ),
                         observe_text_delta,
                     )
@@ -355,6 +358,7 @@ class AgentRuntime:
                             tools=tool_traces,
                             capability=capability,
                             profile_id=profile_id,
+                            reasoning_effort=request_reasoning_effort,
                             escalation_level=escalation_level,
                             model_id=request_model,
                             route_reason=route_reason,
@@ -444,6 +448,7 @@ class AgentRuntime:
                         tools=[],
                         capability=capability,
                         profile_id=profile_id,
+                        reasoning_effort=request_reasoning_effort,
                         escalation_level=escalation_level,
                         model_id=request_model,
                         route_reason=route_reason,

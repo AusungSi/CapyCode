@@ -107,6 +107,17 @@ class SWEbenchRunner:
             raise ValueError(f"SWE-bench task manifest is empty: {path}")
         return tasks
 
+    @staticmethod
+    def agent_task(problem_statement: str) -> str:
+        """Add SWE-bench-specific constraints without leaking hidden tests."""
+        return (
+            "SWE-bench repository repair task. Modify implementation files only; do not "
+            "edit, add, or delete tests. Inspect existing validation and exception conventions "
+            "before choosing behavior. Run focused existing tests, inspect the final diff, and "
+            "finish with the smallest production-code patch that satisfies the report.\n\n"
+            f"Issue:\n{problem_statement}"
+        )
+
     async def run(
         self,
         executor: TaskExecutor,
@@ -143,7 +154,10 @@ class SWEbenchRunner:
                         task, run_workspace, repo_cache=repo_cache, cache_lock=cache_lock
                     )
                     state = await executor(
-                        task.problem_statement, run_workspace, model_id, max_steps
+                        self.agent_task(task.problem_statement),
+                        run_workspace,
+                        model_id,
+                        max_steps,
                     )
                     patch = await self._git_diff(run_workspace)
                     execution_completed = state.status == "completed" or (
@@ -311,7 +325,7 @@ class SWEbenchRunner:
 
         clone = await asyncio.to_thread(
             subprocess.run,
-            ["git", "clone", "--quiet", "--shared", str(cache_repo), str(destination)],
+            ["git", "clone", "--quiet", "--reference", str(cache_repo), str(cache_repo), str(destination)],
             capture_output=True,
             text=True,
             timeout=120,

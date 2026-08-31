@@ -6,6 +6,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
+from capycode.llm.types import ReasoningEffort
+
 
 class TraceModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -85,6 +87,7 @@ class StepTraceEvent(BaseRunEvent):
     retry_count: int = Field(default=0, ge=0)
     capability: str | None = None
     profile_id: str | None = None
+    reasoning_effort: ReasoningEffort | None = None
     escalation_level: int = Field(default=0, ge=0)
     tools: list[ToolCallTrace] = Field(default_factory=list)
 

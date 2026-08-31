@@ -2025,6 +2025,9 @@ class CapyCodeApp(App[None]):
                 output_root=self.workspace / ".capy" / "benchmarks" / "swebench",
                 progress=progress,
             )
+            profiled_artifact = self.workspace / ".capy" / "profiles.json"
+            if not await asyncio.to_thread(profiled_artifact.is_file):
+                profiled_artifact = None
 
             async def executor(
                 task: str, workspace: Path, model: str | None, task_max_steps: int
@@ -2037,6 +2040,7 @@ class CapyCodeApp(App[None]):
                     task_max_steps,
                     settings_store=self.settings_store,
                     profiles_path=self.profiles_path,
+                    profiled_routing_path=profiled_artifact,
                     endpoint_id=resolved.endpoint_id,
                     profile_step_limit=task_max_steps,
                     container_image="capycode/swebench-python:3.11",

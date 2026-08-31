@@ -61,6 +61,24 @@ def test_benchmark_validate_only_does_not_require_model_configuration(
     assert "p0-05" in output
 
 
+def test_swebench_command_accepts_profiled_routing_options() -> None:
+    args = build_parser().parse_args(
+        [
+            "benchmark",
+            "swebench",
+            "--instances",
+            "tasks.jsonl",
+            "--profiles",
+            "profiles.yaml",
+            "--profiled-artifact",
+            "routing.json",
+        ]
+    )
+
+    assert args.profiles == Path("profiles.yaml")
+    assert args.profiled_artifact == Path("routing.json")
+
+
 def test_p2_commands_are_exposed_in_cli_help(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exc_info:
         main(["--help"])
@@ -88,6 +106,8 @@ def test_p2_profile_command_parses_reusable_campaign_options() -> None:
             "3",
             "--reliability-threshold",
             "0.75",
+            "--quality-tolerance",
+            "0.1",
             "--install",
         ]
     )
@@ -99,6 +119,7 @@ def test_p2_profile_command_parses_reusable_campaign_options() -> None:
     assert args.repeats == 2
     assert args.minimum_samples == 3
     assert args.reliability_threshold == 0.75
+    assert args.quality_tolerance == 0.1
     assert args.install is True
 
 

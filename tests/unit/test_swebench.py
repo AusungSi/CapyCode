@@ -26,6 +26,14 @@ def test_swebench_manifest_accepts_prepared_workspace(tmp_path: Path) -> None:
     assert tasks[0].workspace == workspace
 
 
+def test_swebench_agent_task_protects_tests_and_requests_convention_check() -> None:
+    prompt = SWEbenchRunner.agent_task("Raise an error for invalid names.")
+
+    assert "do not edit, add, or delete tests" in prompt
+    assert "exception conventions" in prompt
+    assert prompt.endswith("Raise an error for invalid names.")
+
+
 @pytest.mark.asyncio
 async def test_swebench_runner_writes_predictions_and_metrics(tmp_path: Path) -> None:
     source = tmp_path / "source"
