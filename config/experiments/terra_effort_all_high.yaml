@@ -6,8 +6,7 @@ profiles:
     tools: [list_files, search_code, read_file, write_file, replace_text, run_tests, run_command, git_diff]
     context_policy: retrieval
     budget: {max_output_tokens: 32000, max_steps: 4}
-    reasoning_effort: low
-
+    reasoning_effort: high
   understanding_fast:
     capability: code_understanding
     model: current
@@ -15,8 +14,7 @@ profiles:
     tools: [list_files, search_code, read_file, write_file, replace_text, run_tests, run_command, git_diff]
     context_policy: retrieval
     budget: {max_output_tokens: 32000, max_steps: 5}
-    reasoning_effort: low
-
+    reasoning_effort: high
   planning_balanced:
     capability: task_planning
     model: current
@@ -25,7 +23,6 @@ profiles:
     context_policy: full
     budget: {max_output_tokens: 32000, max_steps: 6}
     reasoning_effort: high
-
   editing_balanced:
     capability: code_editing
     model: current
@@ -34,7 +31,6 @@ profiles:
     context_policy: full
     budget: {max_output_tokens: 32000, max_steps: 8}
     reasoning_effort: high
-
   verification_fast:
     capability: verification
     model: current
@@ -42,8 +38,7 @@ profiles:
     tools: [list_files, search_code, read_file, write_file, replace_text, run_tests, run_command, git_diff]
     context_policy: diagnosis
     budget: {max_output_tokens: 32000, max_steps: 5}
-    reasoning_effort: low
-
+    reasoning_effort: high
   diagnosis_deep:
     capability: failure_diagnosis
     model: current
@@ -51,4 +46,4 @@ profiles:
     tools: [list_files, search_code, read_file, write_file, replace_text, run_tests, run_command, git_diff]
     context_policy: diagnosis
     budget: {max_output_tokens: 32000, max_steps: 6}
-    reasoning_effort: low
+    reasoning_effort: high

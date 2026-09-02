@@ -51,4 +51,4 @@ profiles:
     tools: [read_file, search_code, run_command]
     context_policy: diagnosis
     budget: {max_output_tokens: 32000, max_steps: 4}
-    reasoning_effort: high
+    reasoning_effort: low
