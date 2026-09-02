@@ -4,7 +4,7 @@
 
 ## 当前阶段
 
-当前开发阶段为 **P2 Capability Profiling 与 Routing Evaluation**。P0-0 至 P0-4 的运行时、工具、可观测性和 Textual TUI 已完成；P1/P2 已在每个 Agent Step 中执行 Capability Detection、Profile Routing、上下文与工具策略、失败升级，以及基于实测数据的 Profile 选择：
+当前开发阶段为 **P3 自适应推理策略**。P0-0 至 P0-4 的运行时、工具、可观测性和 Textual TUI 已完成；P1/P2 已实现 Capability Detection、Profile Routing、失败升级与路由评测，P3 新增了可持久化的探索、学习和策略优化运行时：
 
 - 统一 LLM Request/Response/Tool Call 类型
 - OpenAI-compatible Chat Completions 适配器
@@ -19,8 +19,11 @@
 - 受控测试执行、只读 Git diff、循环检测与工具调用数量限制
 - 当前窗口连续上下文与本地会话恢复
 - Provider 中立事件、StepTrace、Token/Cost/Latency 与本地运行审计
+- 基于历史任务结果的 Capability-level effort 探索、成本估计与策略版本管理
 
 Capability 路由使用可解释的本地状态信号；Profile 配置会解析为真实模型 ID，实际路由模型和原因会写入 Step Trace。P2 从冻结基准的真实 Trace 提取 `Profile × Capability × Model` 的成功、成本和延迟统计，只有达到样本量和可靠性阈值的候选才会接管路由；否则保留确定性回退。
+
+P3 自适应运行时会记录每次任务的起始 effort、结果、Capability 成本和主动探索信息。系统先通过 warm-up 与 UCB 补足观测，再用反事实成功率估计，在可靠性容差内选择成本最低的 effort，并将每次更新保存为可回溯的 Policy 版本。没有安装机器学习扩展时，数据收集和探索仍可使用，策略优化会安全保持当前版本。
 
 ## 本地安装
 
@@ -28,6 +31,12 @@ Capability 路由使用可解释的本地状态信号；Profile 配置会解析�
 
 ```powershell
 py -3.11 -m uv sync --extra dev
+```
+
+需要启用 P3 策略优化模型时，同时安装自适应扩展：
+
+```powershell
+py -3.11 -m uv sync --extra dev --extra adaptive
 ```
 
 将开发版本注册为当前用户的终端命令（只需执行一次）：
