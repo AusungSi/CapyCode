@@ -17,6 +17,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field
 
 from capycode.capability import Capability, ProfiledRoutingArtifact, ProfileMeasurement
+from capycode.llm.types import ReasoningEffort
 from capycode.trace import RUN_EVENT_ADAPTER, StepTraceEvent
 
 from .baseline import GateCampaignReport, GateTaskCatalog, P0GateRunner, TaskExecutor
@@ -136,7 +137,9 @@ def measurements_from_report(report: GateCampaignReport) -> list[ProfileMeasurem
             lines = trace_path.read_text(encoding="utf-8").splitlines()
         except OSError as exc:
             raise ValueError(f"unable to read profiling trace {trace_path}: {exc}") from exc
-        aggregated: dict[tuple[str, Capability, str, str | None], tuple[float, float]] = {}
+        aggregated: dict[
+            tuple[str, Capability, str, ReasoningEffort | None], tuple[float, float]
+        ] = {}
         for line in lines:
             if not line.strip():
                 continue

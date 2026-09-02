@@ -9,9 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 DEFAULT_MAX_OUTPUT_TOKENS = 32_000
 MAX_OUTPUT_TOKENS_UPPER_LIMIT = 64_000
 
-ReasoningEffort: TypeAlias = Literal[
-    "none", "minimal", "low", "medium", "high", "xhigh"
-]
+ReasoningEffort: TypeAlias = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
 
 
 class RuntimeModel(BaseModel):

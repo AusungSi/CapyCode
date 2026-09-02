@@ -325,7 +325,15 @@ class SWEbenchRunner:
 
         clone = await asyncio.to_thread(
             subprocess.run,
-            ["git", "clone", "--quiet", "--reference", str(cache_repo), str(cache_repo), str(destination)],
+            [
+                "git",
+                "clone",
+                "--quiet",
+                "--reference",
+                str(cache_repo),
+                str(cache_repo),
+                str(destination),
+            ],
             capture_output=True,
             text=True,
             timeout=120,

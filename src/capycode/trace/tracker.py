@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Literal, cast
 from uuid import uuid4
 
 from capycode.llm import LLMResponse
+from capycode.llm.types import ReasoningEffort
 from capycode.tools import ToolResult
 
 if TYPE_CHECKING:
@@ -184,7 +185,7 @@ class RunTracker:
         tools: list[ToolCallTrace],
         capability: str | None = None,
         profile_id: str | None = None,
-        reasoning_effort: str | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
         escalation_level: int = 0,
         model_id: str | None = None,
         route_reason: str | None = None,

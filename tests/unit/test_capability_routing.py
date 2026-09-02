@@ -52,9 +52,7 @@ def test_default_profile_registry_keys_match_profile_ids() -> None:
 def test_profile_registry_applies_model_and_reasoning_overrides() -> None:
     configured = registry()
 
-    overridden = configured.with_routing_overrides(
-        {"retrieval_fast": ("fast-model", "low")}
-    )
+    overridden = configured.with_routing_overrides({"retrieval_fast": ("fast-model", "low")})
 
     assert overridden.get("retrieval_fast").model_ref == "fast-model"
     assert overridden.get("retrieval_fast").reasoning_effort == "low"

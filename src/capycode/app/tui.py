@@ -73,16 +73,7 @@ def _resolve_manifest_path(path: Path, workspace: Path) -> Path:
 
 def _path_to_file_url(path: Path) -> str:
     """Convert a local file path to a proper file:// URL that works in Textual/browsers."""
-    # Convert to absolute path and resolve
-    abs_path = path.resolve()
-    # Convert Windows path to forward slashes
-    path_str = str(abs_path).replace('\\', '/')
-    # For Windows paths with drive letter (e.g., D:/project/...)
-    if len(path_str) > 1 and path_str[1] == ':':
-        # file:///D:/project/... format for Windows
-        return f'file:///{path_str}'
-    # For Unix paths
-    return f'file://{path_str}'
+    return path.resolve().as_uri()
 
 
 @dataclass(frozen=True)
@@ -1977,7 +1968,7 @@ class CapyCodeApp(App[None]):
                 if report.gate_passed
                 else ("冒烟通过（完整 Gate 未评估）" if smoke_passed else "未通过")
             )
-            report_url = _path_to_file_url(report_root / 'report.md')
+            report_url = _path_to_file_url(report_root / "report.md")
             self._write_system(
                 f"benchmark 完成：{result} · 通过率 {report.passed_runs}/{report.total_runs} "
                 f"({report.pass_rate:.1%}) · Pass@1 {report.pass_at_1:.1%}\n"
@@ -2040,9 +2031,12 @@ class CapyCodeApp(App[None]):
                 output_root=self.workspace / ".capy" / "benchmarks" / "swebench",
                 progress=progress,
             )
-            profiled_artifact = self.workspace / ".capy" / "profiles.json"
-            if not await asyncio.to_thread(profiled_artifact.is_file):
-                profiled_artifact = None
+            profiled_artifact_path = self.workspace / ".capy" / "profiles.json"
+            profiled_artifact = (
+                profiled_artifact_path
+                if await asyncio.to_thread(profiled_artifact_path.is_file)
+                else None
+            )
 
             async def executor(
                 task: str, workspace: Path, model: str | None, task_max_steps: int
@@ -2076,8 +2070,8 @@ class CapyCodeApp(App[None]):
                 if execution_failures == 0
                 else f"Agent 执行结束，{execution_failures} 个实例未完成"
             )
-            predictions_url = _path_to_file_url(report_root / 'predictions.jsonl')
-            report_url = _path_to_file_url(report_root / 'report.md')
+            predictions_url = _path_to_file_url(report_root / "predictions.jsonl")
+            report_url = _path_to_file_url(report_root / "report.md")
             self._write_system(
                 f"SWE-bench 完成：{outcome} · 完成 {report.completed_tasks}/{report.total_tasks}\n"
                 f"失败 {report.failed_tasks} · 模型请求错误 {report.model_errors} · "
