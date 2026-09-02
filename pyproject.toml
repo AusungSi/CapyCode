@@ -16,6 +16,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+adaptive = [
+  "scikit-learn>=1.5.0",
+]
 dev = [
   "mypy>=1.17.0",
   "pytest>=8.4.0",
@@ -46,6 +49,7 @@ select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
 
 [tool.ruff.lint.per-file-ignores]
 "src/capycode/app/tui.py" = ["RUF001"]
+"src/capycode/adaptive/*.py" = ["RUF001", "RUF002", "RUF003"]
 
 [tool.mypy]
 python_version = "3.11"
