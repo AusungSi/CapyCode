@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "task_id": "p0-02",
+  "title": "Parse explicit boolean fields",
+  "capability": "data parsing and validation",
+  "prompt": "Fix records.parse_record so that it follows its documented boolean and validation contract. Run the unittest suite before and after the change, modify only records.py, and inspect the final git diff.",
+  "allowed_modified_files": ["records.py"],
+  "max_steps": 12
+}

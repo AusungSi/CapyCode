@@ -6,8 +6,16 @@ from pathlib import Path
 
 import pytest
 
-from capycode.core import AgentRuntime
-from capycode.llm import LLMResponse, ScriptedLLM, ToolCall
+from capycode.core import AgentRuntime, SessionState
+from capycode.llm import (
+    LLMError,
+    LLMErrorKind,
+    LLMRequest,
+    LLMResponse,
+    Message,
+    ScriptedLLM,
+    ToolCall,
+)
 from capycode.tools import build_p0_runtime_tools
 
 
@@ -130,7 +138,7 @@ async def test_agent_pairs_tool_results_when_per_step_limit_is_exceeded(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_agent_stops_after_three_identical_tool_steps(tmp_path: Path) -> None:
+async def test_agent_stops_after_bounded_identical_tool_recoveries(tmp_path: Path) -> None:
     (tmp_path / "loop.txt").write_text("loop", encoding="utf-8")
     responses = [
         LLMResponse(
@@ -138,15 +146,81 @@ async def test_agent_stops_after_three_identical_tool_steps(tmp_path: Path) -> N
                 ToolCall(id=f"call-{index}", name="read_file", arguments={"path": "loop.txt"})
             ]
         )
-        for index in range(3)
+        for index in range(9)
     ]
-    runtime = AgentRuntime(ScriptedLLM(responses), build_p0_runtime_tools(), max_steps=5)
+    runtime = AgentRuntime(ScriptedLLM(responses), build_p0_runtime_tools(), max_steps=10)
 
     state = await runtime.run("Loop forever", tmp_path, "fake-model")
 
     assert state.status == "failed"
     assert state.termination_reason == "loop_detected"
-    assert len([message for message in state.history if message.role == "tool"]) == 3
+    assert len([message for message in state.history if message.role == "tool"]) == 9
+    recovery_messages = [
+        message
+        for message in state.history
+        if message.role == "user" and message.content and "Loop recovery" in message.content
+    ]
+    assert len(recovery_messages) == 2
+
+
+@pytest.mark.asyncio
+async def test_agent_can_recover_from_repeated_tool_steps(tmp_path: Path) -> None:
+    (tmp_path / "loop.txt").write_text("loop", encoding="utf-8")
+    repeated = [
+        LLMResponse(
+            tool_calls=[
+                ToolCall(id=f"call-{index}", name="read_file", arguments={"path": "loop.txt"})
+            ]
+        )
+        for index in range(3)
+    ]
+    client = ScriptedLLM([*repeated, LLMResponse(content="Changed approach and finished.")])
+    runtime = AgentRuntime(client, build_p0_runtime_tools(), max_steps=5)
+
+    state = await runtime.run("Recover from a loop", tmp_path, "fake-model")
+
+    assert state.status == "completed"
+    assert state.final_answer == "Changed approach and finished."
+
+
+@pytest.mark.asyncio
+async def test_agent_compacts_and_retries_explicit_context_limit_error(tmp_path: Path) -> None:
+    class ContextLimitOnceLLM:
+        def __init__(self) -> None:
+            self.requests: list[LLMRequest] = []
+
+        async def stream(self, request: LLMRequest, on_text_delta) -> LLMResponse:
+            self.requests.append(request.model_copy(deep=True))
+            if len(self.requests) == 1:
+                raise LLMError(
+                    LLMErrorKind.BAD_REQUEST,
+                    "model endpoint returned HTTP 400: maximum context length exceeded",
+                    retryable=False,
+                    status_code=400,
+                )
+            return LLMResponse(content="Completed after compaction.")
+
+    client = ContextLimitOnceLLM()
+    state = SessionState(
+        workspace=str(tmp_path),
+        task="Fix the bug",
+        history=[
+            Message(role="system", content="system"),
+            Message(role="user", content="Fix the bug"),
+            Message(role="assistant", content="old diagnostic output " * 2_500),
+            Message(role="user", content="Continue"),
+        ],
+    )
+    runtime = AgentRuntime(client, build_p0_runtime_tools(), max_steps=3)
+
+    result = await runtime.run("Fix the bug", tmp_path, "fake-model", state=state)
+
+    assert result.status == "completed"
+    assert result.retry_count == 1
+    assert len(client.requests) == 2
+    first_characters = sum(len(message.content or "") for message in client.requests[0].messages)
+    second_characters = sum(len(message.content or "") for message in client.requests[1].messages)
+    assert second_characters < first_characters
 
 
 @pytest.mark.asyncio
@@ -208,3 +282,23 @@ async def test_non_git_single_file_web_workspace_finishes_without_retries(tmp_pa
     assert state.modified_files == ["index.html"]
     assert "not a Git repository" in state.current_diff
     assert (tmp_path / "index.html").read_text(encoding="utf-8") == "<main>Snake</main>\n"
+
+
+@pytest.mark.asyncio
+async def test_reasoning_only_response_is_continued(tmp_path: Path) -> None:
+    client = ScriptedLLM(
+        [
+            LLMResponse(reasoning_content="I need to inspect the repository first."),
+            LLMResponse(content="Task completed."),
+        ]
+    )
+    runtime = AgentRuntime(client, build_p0_runtime_tools(), max_steps=3)
+
+    state = await runtime.run("Explain the workspace", tmp_path, "fake-model")
+
+    assert state.status == "completed"
+    assert state.final_answer == "Task completed."
+    assert len(client.requests) == 2
+    assert client.requests[1].messages[-1].content == (
+        "Continue the coding task. Use the available tools now; do not return reasoning only."
+    )

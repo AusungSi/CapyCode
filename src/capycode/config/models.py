@@ -6,6 +6,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from capycode.llm.types import ReasoningEffort
+
 
 class StrictConfigModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -13,6 +15,7 @@ class StrictConfigModel(BaseModel):
 
 class PricingConfig(StrictConfigModel):
     input_per_million: float = Field(ge=0)
+    cached_input_per_million: float | None = Field(default=None, ge=0)
     output_per_million: float = Field(ge=0)
     snapshot_date: date
 
@@ -60,6 +63,7 @@ class ProfileConfig(StrictConfigModel):
     tools: list[str] = Field(min_length=1)
     context_policy: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
     budget: BudgetConfig
+    reasoning_effort: ReasoningEffort | None = None
 
 
 class ProfileRegistryConfig(StrictConfigModel):

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from capycode.app import cli
-from capycode.app.cli import inspect_run, main, run_doctor, show_runs, show_welcome
+from capycode.app.cli import build_parser, inspect_run, main, run_doctor, show_runs, show_welcome
 from capycode.trace import RunSummary
 
 
@@ -20,7 +20,7 @@ def test_no_arguments_starts_branded_entrypoint(
     output = capsys.readouterr().out
     assert "CapyCode 0.1.0" in output
     assert f"workspace: {tmp_path.resolve()}" in output
-    assert "stage: P0-1 interactive runtime" in output
+    assert "stage: P0 baseline gate" in output
 
 
 def test_main_without_arguments_exits_successfully(
@@ -47,6 +47,103 @@ def test_version_command(capsys: pytest.CaptureFixture[str]) -> None:
 
     assert exc_info.value.code == 0
     assert capsys.readouterr().out.strip() == "0.1.0"
+
+
+def test_benchmark_validate_only_does_not_require_model_configuration(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        main(["benchmark", "p0", "--validate-only"])
+
+    assert exc_info.value.code == 0
+    output = capsys.readouterr().out
+    assert "validated 5 P0 fixture(s)" in output
+    assert "p0-05" in output
+
+
+def test_swebench_command_accepts_profiled_routing_options() -> None:
+    args = build_parser().parse_args(
+        [
+            "benchmark",
+            "swebench",
+            "--instances",
+            "tasks.jsonl",
+            "--profiles",
+            "profiles.yaml",
+            "--profiled-artifact",
+            "routing.json",
+        ]
+    )
+
+    assert args.profiles == Path("profiles.yaml")
+    assert args.profiled_artifact == Path("routing.json")
+
+
+def test_p2_commands_are_exposed_in_cli_help(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--help"])
+
+    assert exc_info.value.code == 0
+    output = capsys.readouterr().out
+    assert "profile" in output
+    assert "evaluate" in output
+
+
+def test_p2_profile_command_parses_reusable_campaign_options() -> None:
+    args = build_parser().parse_args(
+        [
+            "profile",
+            "p0",
+            "--model",
+            "model-a",
+            "--model",
+            "model-b",
+            "--task",
+            "p0-01",
+            "--repeats",
+            "2",
+            "--minimum-samples",
+            "3",
+            "--reliability-threshold",
+            "0.75",
+            "--quality-tolerance",
+            "0.1",
+            "--install",
+        ]
+    )
+
+    assert args.command == "profile"
+    assert args.profile_command == "p0"
+    assert args.models == ["model-a", "model-b"]
+    assert args.tasks == ["p0-01"]
+    assert args.repeats == 2
+    assert args.minimum_samples == 3
+    assert args.reliability_threshold == 0.75
+    assert args.quality_tolerance == 0.1
+    assert args.install is True
+
+
+def test_p2_evaluation_command_parses_configurable_strategies() -> None:
+    args = build_parser().parse_args(
+        [
+            "evaluate",
+            "p0",
+            "--fixed-model",
+            "model-a",
+            "--fixed-model",
+            "model-b",
+            "--profiled-artifact",
+            "profiles.json",
+            "--task",
+            "p0-05",
+        ]
+    )
+
+    assert args.command == "evaluate"
+    assert args.evaluation_command == "p0"
+    assert args.fixed_models == ["model-a", "model-b"]
+    assert args.profiled_artifact == Path("profiles.json")
+    assert args.tasks == ["p0-05"]
 
 
 @pytest.mark.parametrize(
@@ -150,5 +247,5 @@ def test_runs_and_inspect_run_read_local_summary(
     assert inspect_run(tmp_path, run_id[:8]) == 0
     inspect_output = capsys.readouterr().out
     assert f"run_id: {run_id}" in inspect_output
-    assert "tokens: 100 input, 20 output" in inspect_output
+    assert "tokens: 100 input, 0 cached input, 20 output" in inspect_output
     assert "modified_files: demo.py" in inspect_output

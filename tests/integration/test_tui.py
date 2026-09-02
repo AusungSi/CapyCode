@@ -11,9 +11,11 @@ from textual.widgets import Button, Input, OptionList, Select, Static
 from capycode.app.tui import (
     CapyCodeApp,
     ChatMessage,
+    ModelConfigScreen,
     RunDetailScreen,
     RunPickerScreen,
     SessionPickerScreen,
+    SWEbenchConfigScreen,
     ThinkingIndicator,
     ToolActivity,
 )
@@ -50,6 +52,57 @@ async def test_slash_opens_command_menu(tmp_path: Path) -> None:
         option_ids = [option.id for option in menu.options]
         assert "/help" in option_ids
         assert "/config" in option_ids
+
+
+@pytest.mark.asyncio
+async def test_slash_alone_shows_help_instead_of_unknown_command(tmp_path: Path) -> None:
+    app = CapyCodeApp(
+        workspace=tmp_path,
+        settings_store=UserSettingsStore(tmp_path / "settings.json"),
+    )
+
+    async with app.run_test() as pilot:
+        app._dismiss_splash()
+        prompt = app.query_one("#prompt", Input)
+        prompt.value = "/"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        transcript = app.query_one("#transcript")
+        rendered = "\n".join(str(message.render()) for message in transcript.children)
+        assert "未知命令" not in rendered
+        assert "可用命令" in rendered
+
+
+@pytest.mark.asyncio
+async def test_benchmark_swebench_opens_configuration_screen(tmp_path: Path) -> None:
+    app = CapyCodeApp(
+        workspace=tmp_path,
+        settings_store=UserSettingsStore(tmp_path / "settings.json"),
+    )
+
+    async with app.run_test() as pilot:
+        app._dismiss_splash()
+        prompt = app.query_one("#prompt", Input)
+        prompt.value = "/benchmark swebench"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert isinstance(app.screen, SWEbenchConfigScreen)
+        assert app.screen.query_one("#swebench-max-steps", Input).value == "200"
+        assert app.screen.query_one("#swebench-max-concurrency", Input).value == "2"
+        manifest = tmp_path / "instances.jsonl"
+        manifest.write_text(
+            '{"instance_id":"demo-1","problem_statement":"fix it",'
+            f'"workspace":"{tmp_path.as_posix()}"}}\n',
+            encoding="utf-8",
+        )
+        app.screen.query_one("#swebench-instances", Input).value = str(manifest)
+        app.screen.query_one("#swebench-max-steps", Input).value = "0"
+        app.screen.query_one("#swebench-start", Button).press()
+        await pilot.pause()
+        assert isinstance(app.screen, SWEbenchConfigScreen)
+        assert "正整数" in str(app.screen.query_one("#swebench-error", Static).render())
 
 
 @pytest.mark.asyncio
@@ -101,6 +154,9 @@ async def test_slash_model_picker_switches_real_model(tmp_path: Path) -> None:
         await pilot.press("enter")
         await pilot.pause()
         picker = app.screen.query_one("#model-picker-list", OptionList)
+        app.screen.query_one("#model-refresh", Button).press()
+        await pilot.pause()
+        await app.screen.workers.wait_for_complete()
         assert [option.id for option in picker.options] == [
             "model-a",
             "model-b",
@@ -124,6 +180,48 @@ async def test_slash_model_picker_switches_real_model(tmp_path: Path) -> None:
         status = app.query_one("#status-line", Static)
         assert "model-c" in str(status.render())
         assert "small" not in str(status.render())
+
+
+@pytest.mark.asyncio
+async def test_model_picker_uses_only_current_endpoint_cached_models(tmp_path: Path) -> None:
+    store = UserSettingsStore(tmp_path / "settings.json")
+    store.configure_endpoint(
+        endpoint_id="default",
+        model="openai-model",
+        base_url="https://default.example/v1",
+        api_key="default-key",
+        available_models=["openai-model", "openai-other"],
+    )
+    store.configure_endpoint(
+        endpoint_id="guochan",
+        model="qwen-model",
+        base_url="https://token.nuaa.edu.cn/v1",
+        api_key="guochan-key",
+        available_models=["qwen-model", "deepseek-model"],
+    )
+
+    async def unavailable_model_fetcher(base_url: str, api_key: str) -> list[str]:
+        raise RuntimeError("HTTP 404: /models is not supported")
+
+    app = CapyCodeApp(
+        workspace=tmp_path,
+        settings_store=store,
+        model_fetcher=unavailable_model_fetcher,
+    )
+
+    async with app.run_test() as pilot:
+        app._select_endpoint("guochan")
+        await pilot.pause()
+        app.query_one("#prompt", Input).value = "/model"
+        await pilot.press("enter")
+        await pilot.pause()
+        picker = app.screen.query_one("#model-picker-list", OptionList)
+        assert [option.id for option in picker.options] == ["deepseek-model", "qwen-model"]
+        assert picker.has_focus
+
+        await pilot.press("up", "enter")
+        await pilot.pause()
+        assert app.model_id == "deepseek-model"
 
 
 @pytest.mark.asyncio
@@ -170,6 +268,155 @@ async def test_config_dialog_saves_local_model_settings(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_config_dialog_actions_are_visible_and_escape_closes(tmp_path: Path) -> None:
+    app = CapyCodeApp(
+        workspace=tmp_path,
+        settings_store=UserSettingsStore(tmp_path / "settings.json"),
+    )
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        app._open_config()
+        await pilot.pause()
+
+        screen = app.screen
+        assert isinstance(screen, ModelConfigScreen)
+        for button_id in ("#config-delete", "#config-cancel", "#config-save"):
+            button = screen.query_one(button_id, Button)
+            assert button.display
+            assert button.region.y + button.region.height <= app.size.height
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not isinstance(app.screen, ModelConfigScreen)
+
+
+@pytest.mark.asyncio
+async def test_config_dialog_can_save_manual_model_without_models_endpoint(tmp_path: Path) -> None:
+    store = UserSettingsStore(tmp_path / "settings.json")
+
+    async def unavailable_model_fetcher(base_url: str, api_key: str) -> list[str]:
+        raise RuntimeError("HTTP 404: /models is not supported")
+
+    app = CapyCodeApp(
+        workspace=tmp_path,
+        settings_store=store,
+        model_fetcher=unavailable_model_fetcher,
+    )
+
+    async with app.run_test() as pilot:
+        app._open_config()
+        await pilot.pause()
+        screen = app.screen
+        screen.query_one("#config-base-url", Input).value = "https://token.nuaa.edu.cn/v1"
+        screen.query_one("#config-api-key", Input).value = "local-secret"
+        screen.query_one("#config-model-id", Input).value = "qwen-coder"
+        screen.query_one("#config-discover", Button).press()
+        await pilot.pause()
+        await screen.workers.wait_for_complete()
+        screen.query_one("#config-save", Button).press()
+        await pilot.pause()
+
+        configured = store.load()
+        assert configured.default_model == "qwen-coder"
+        assert configured.endpoint is not None
+        assert configured.endpoint.base_url == "https://token.nuaa.edu.cn/v1"
+        assert configured.endpoint.available_models == ["qwen-coder"]
+
+
+@pytest.mark.asyncio
+async def test_config_new_endpoint_does_not_inherit_models_from_default_endpoint(
+    tmp_path: Path,
+) -> None:
+    store = UserSettingsStore(tmp_path / "settings.json")
+    store.configure_endpoint(
+        endpoint_id="default",
+        model="default-model",
+        base_url="https://default.example/v1",
+        api_key="default-key",
+        available_models=["default-model", "default-other"],
+    )
+    app = CapyCodeApp(workspace=tmp_path, settings_store=store)
+
+    async with app.run_test() as pilot:
+        app._open_config()
+        await pilot.pause()
+        screen = app.screen
+        screen.query_one("#config-endpoint-id", Input).value = "guochan"
+        screen.query_one("#config-base-url", Input).value = "https://token.nuaa.edu.cn/v1"
+        screen.query_one("#config-api-key", Input).value = "local-secret"
+        screen.query_one("#config-model-id", Input).value = "qwen-coder"
+        screen.query_one("#config-save", Button).press()
+        await pilot.pause()
+
+    settings = store.load()
+    assert settings.endpoints["guochan"].available_models == ["qwen-coder"]
+
+
+@pytest.mark.asyncio
+async def test_config_model_picker_selection_updates_manual_model_value(tmp_path: Path) -> None:
+    store = UserSettingsStore(tmp_path / "settings.json")
+    store.configure_endpoint(
+        model="model-a",
+        base_url="https://example.test/v1",
+        api_key="local-secret",
+        available_models=["model-a", "model-b"],
+    )
+    app = CapyCodeApp(workspace=tmp_path, settings_store=store)
+
+    async with app.run_test() as pilot:
+        app._open_config()
+        await pilot.pause()
+        screen = app.screen
+        model_select = screen.query_one("#config-model", Select)
+        model_select.value = "model-b"
+        await pilot.pause()
+        assert screen.query_one("#config-model-id", Input).value == "model-b"
+        screen.query_one("#config-save", Button).press()
+        await pilot.pause()
+
+    assert store.load().default_model == "model-b"
+
+
+@pytest.mark.asyncio
+async def test_model_manager_can_add_update_and_delete_current_endpoint_model(
+    tmp_path: Path,
+) -> None:
+    store = UserSettingsStore(tmp_path / "settings.json")
+    store.configure_endpoint(
+        endpoint_id="guochan",
+        model="deepseek-model",
+        base_url="https://token.nuaa.edu.cn/v1",
+        api_key="local-secret",
+        available_models=["deepseek-model", "gpt-5.5", "codex-auto-review"],
+    )
+    app = CapyCodeApp(workspace=tmp_path, settings_store=store)
+
+    async with app.run_test() as pilot:
+        app.query_one("#prompt", Input).value = "/model"
+        await pilot.press("enter")
+        await pilot.pause()
+        screen = app.screen
+        entry = screen.query_one("#model-entry", Input)
+        entry.value = "deepseek-chat"
+        screen.query_one("#model-add", Button).press()
+        await pilot.pause()
+        assert "deepseek-chat" in store.load().endpoint.available_models
+
+        picker = screen.query_one("#model-picker-list", OptionList)
+        picker.highlighted = picker.get_option_index("deepseek-chat")
+        entry.value = "deepseek-chat-v2"
+        screen.query_one("#model-update", Button).press()
+        await pilot.pause()
+        assert "deepseek-chat-v2" in store.load().endpoint.available_models
+
+        picker.highlighted = picker.get_option_index("gpt-5.5")
+        screen.query_one("#model-delete", Button).press()
+        await pilot.pause()
+
+    assert "gpt-5.5" not in store.load().endpoint.available_models
+
+
+@pytest.mark.asyncio
 async def test_pricing_dialog_saves_price_for_real_model_id(tmp_path: Path) -> None:
     store = UserSettingsStore(tmp_path / "settings.json")
     store.configure_endpoint(
@@ -186,6 +433,7 @@ async def test_pricing_dialog_saves_price_for_real_model_id(tmp_path: Path) -> N
         await pilot.pause()
 
         app.screen.query_one("#pricing-input", Input).value = "2.5"
+        app.screen.query_one("#pricing-cached-input", Input).value = "0.5"
         app.screen.query_one("#pricing-output", Input).value = "10"
         app.screen.query_one("#pricing-currency", Input).value = "cny"
         app.screen.query_one("#pricing-context", Input).value = "200000"
@@ -195,6 +443,7 @@ async def test_pricing_dialog_saves_price_for_real_model_id(tmp_path: Path) -> N
 
         metadata = store.load().models["model-a"]
         assert metadata.pricing.input_per_million == 2.5
+        assert metadata.pricing.cached_input_per_million == 0.5
         assert metadata.pricing.output_per_million == 10
         assert metadata.pricing.currency == "CNY"
         assert metadata.pricing.snapshot_date == date(2026, 8, 28)

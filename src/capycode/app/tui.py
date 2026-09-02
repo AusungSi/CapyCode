@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections.abc import Awaitable, Callable
@@ -26,9 +27,11 @@ from textual.widgets import (
 )
 from textual.widgets.option_list import Option
 
-from capycode.config.loader import DEFAULT_MODELS_PATH
-from capycode.config.user_settings import UserEndpointSettings, UserSettingsStore
+from capycode.capability import ProfileRegistry, build_default_profile_registry
+from capycode.config.loader import DEFAULT_MODELS_PATH, load_profiles
+from capycode.config.user_settings import UserEndpointSettings, UserSettingsStore, resolve_model
 from capycode.core import RuntimeObserver, SessionState, SessionStore, SessionSummary
+from capycode.profiling import GateTaskCatalog, P0GateRunner, SWEbenchRunner
 from capycode.tools import ToolResult
 from capycode.trace import (
     AssistantTextEvent,
@@ -61,6 +64,18 @@ TaskRunner = Callable[
 ModelFetcher = Callable[[str, str], Awaitable[list[str]]]
 
 
+def _resolve_manifest_path(path: Path, workspace: Path) -> Path:
+    path = path.expanduser()
+    if not path.is_absolute():
+        path = workspace / path
+    return path.resolve()
+
+
+def _path_to_file_url(path: Path) -> str:
+    """Convert a local file path to a proper file:// URL that works in Textual/browsers."""
+    return path.resolve().as_uri()
+
+
 @dataclass(frozen=True)
 class SlashCommand:
     name: str
@@ -71,8 +86,16 @@ class SlashCommand:
 COMMANDS = (
     SlashCommand("/help", "/help", "显示可用命令"),
     SlashCommand("/config", "/config", "配置当前模型和本地凭据"),
-    SlashCommand("/models", "/models", "列出服务端返回的可用模型"),
-    SlashCommand("/model", "/model [model-id]", "打开模型选择器或直接切换"),
+    SlashCommand("/endpoints", "/endpoints", "列出已保存的模型端点"),
+    SlashCommand("/endpoint", "/endpoint [端点 ID]", "切换已保存的模型端点"),
+    SlashCommand(
+        "/benchmark",
+        "/benchmark [p0|swebench]",
+        "运行 P0 或 SWE-bench 基准测试",
+    ),
+    SlashCommand("/profiles", "/profiles", "查看当前能力 Profile"),
+    SlashCommand("/models", "/models", "刷新并列出当前端点的模型"),
+    SlashCommand("/model", "/model [model-id]", "管理当前端点模型或直接切换"),
     SlashCommand("/pricing", "/pricing", "配置当前真实模型的价格和上下文窗口"),
     SlashCommand("/workspace", "/workspace [path]", "查看或切换工作区"),
     SlashCommand("/resume", "/resume [会话 ID]", "选择并恢复当前工作区的会话"),
@@ -325,6 +348,8 @@ class SplashAnimation(Static):
 
 
 class ModelConfigScreen(ModalScreen[bool]):
+    BINDINGS: ClassVar[list[BindingType]] = [("escape", "cancel", "取消")]
+
     CSS = """
     ModelConfigScreen {
         align: center middle;
@@ -333,11 +358,17 @@ class ModelConfigScreen(ModalScreen[bool]):
 
     #config-dialog {
         width: 72;
-        height: auto;
+        height: 90%;
         max-height: 90%;
         border: round $accent;
         background: $surface;
         padding: 1 2;
+    }
+
+    #config-form {
+        height: 1fr;
+        scrollbar-size: 1 1;
+        padding-right: 1;
     }
 
     #config-dialog Input {
@@ -351,8 +382,11 @@ class ModelConfigScreen(ModalScreen[bool]):
 
     #config-actions {
         align-horizontal: right;
-        height: auto;
-        margin-top: 1;
+        height: 3;
+        min-height: 3;
+        dock: bottom;
+        background: $surface;
+        padding-top: 1;
     }
 
     #config-actions Button {
@@ -370,43 +404,70 @@ class ModelConfigScreen(ModalScreen[bool]):
         self,
         store: UserSettingsStore,
         model_fetcher: ModelFetcher,
+        endpoint_id: str | None = None,
     ) -> None:
         super().__init__()
         self.store = store
         self.model_fetcher = model_fetcher
-        endpoint = self.store.load().endpoint
+        self.endpoint_id = endpoint_id or self.store.load().default_endpoint or "default"
+        settings = self.store.load()
+        endpoint = settings.endpoints.get(self.endpoint_id)
+        if endpoint is None and self.endpoint_id == "default":
+            endpoint = settings.endpoint
         self.available_models = list(endpoint.available_models) if endpoint else []
+        self.available_models_endpoint_id = self.endpoint_id
 
     def compose(self) -> ComposeResult:
         settings = self.store.load()
-        endpoint = settings.endpoint
+        endpoint = settings.endpoints.get(self.endpoint_id)
+        if endpoint is None and self.endpoint_id == "default":
+            endpoint = settings.endpoint
         with Vertical(id="config-dialog"):
-            yield Label("配置模型服务", id="config-title")
-            yield Label("Base URL")
-            yield Input(
-                value=endpoint.base_url if endpoint else "",
-                placeholder="https://example.com/v1",
-                id="config-base-url",
-            )
-            yield Label("API Key（仅保存在本机用户目录）")
-            yield Input(
-                value=endpoint.api_key if endpoint else "",
-                placeholder="输入 API Key",
-                password=True,
-                id="config-api-key",
-            )
-            yield Button("获取可用模型", id="config-discover")
-            yield Static("", id="config-error")
-            yield Label("模型 ID")
-            initial_options = [(model, model) for model in self.available_models]
-            yield Select[str](
-                initial_options,
-                value=settings.default_model or Select.NULL,
-                prompt="请先获取模型列表",
-                allow_blank=True,
-                id="config-model",
-            )
+            with VerticalScroll(id="config-form"):
+                yield Label("配置模型服务", id="config-title")
+                yield Label("端点 ID（用于保存和切换）")
+                yield Input(value=self.endpoint_id, placeholder="openai", id="config-endpoint-id")
+                yield Label("Base URL")
+                yield Input(
+                    value=endpoint.base_url if endpoint else "",
+                    placeholder="https://example.com/v1",
+                    id="config-base-url",
+                )
+                yield Label("API Key（仅保存在本机用户目录）")
+                yield Input(
+                    value=endpoint.api_key if endpoint else "",
+                    placeholder="输入 API Key",
+                    password=True,
+                    id="config-api-key",
+                )
+                yield Button("获取可用模型", id="config-discover")
+                yield Static("", id="config-error")
+                yield Label("模型 ID（服务不提供 /models 时可手动填写）")
+                yield Input(
+                    value=(
+                        settings.default_model
+                        if endpoint is not None and self.endpoint_id == settings.default_endpoint
+                        else ""
+                    ),
+                    placeholder="例如 qwen2.5-coder-32b-instruct",
+                    id="config-model-id",
+                )
+                yield Label("已发现的模型")
+                initial_options = [(model, model) for model in self.available_models]
+                selected_model = (
+                    settings.default_model
+                    if settings.default_model in self.available_models
+                    else Select.NULL
+                )
+                yield Select[str](
+                    initial_options,
+                    value=selected_model,
+                    prompt="请先获取模型列表",
+                    allow_blank=True,
+                    id="config-model",
+                )
             with Horizontal(id="config-actions"):
+                yield Button("删除此端点", variant="error", id="config-delete")
                 yield Button("取消", id="config-cancel")
                 yield Button("保存", variant="primary", id="config-save")
 
@@ -414,14 +475,41 @@ class ModelConfigScreen(ModalScreen[bool]):
     def cancel(self) -> None:
         self.dismiss(False)
 
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+    @on(Button.Pressed, "#config-delete")
+    def delete(self) -> None:
+        endpoint_id = self.query_one("#config-endpoint-id", Input).value.strip()
+        if not endpoint_id:
+            self.query_one("#config-error", Static).update("请先填写要删除的端点 ID。")
+            return
+        try:
+            self.store.delete_endpoint(endpoint_id)
+        except (OSError, ValueError) as exc:
+            self.query_one("#config-error", Static).update(str(exc))
+            return
+        self.dismiss(True)
+
     @on(Button.Pressed, "#config-save")
     def save(self) -> None:
         base_url = self.query_one("#config-base-url", Input).value.strip()
         api_key = self.query_one("#config-api-key", Input).value.strip()
+        endpoint_id = self.query_one("#config-endpoint-id", Input).value.strip()
+        manual_model = self.query_one("#config-model-id", Input).value.strip()
         selected_model = self.query_one("#config-model", Select).value
-        if selected_model is Select.NULL or not base_url or not api_key:
+        model_id = manual_model or (
+            str(selected_model) if selected_model is not Select.NULL else ""
+        )
+        settings = self.store.load()
+        existing_endpoint = settings.endpoints.get(endpoint_id)
+        existing_models = list(existing_endpoint.available_models) if existing_endpoint else []
+        if endpoint_id == self.endpoint_id and self.available_models_endpoint_id == endpoint_id:
+            existing_models = self.available_models
+        available_models = list(dict.fromkeys(existing_models + ([model_id] if model_id else [])))
+        if not model_id or not base_url or not api_key or not endpoint_id:
             self.query_one("#config-error", Static).update(
-                "请先填写 URL 和 API Key、获取模型列表并选择模型。"
+                "请填写端点 ID、URL、API Key 和模型 ID；服务不支持 /models 时可直接手动填写。"
             )
             return
         if not base_url.startswith(("http://", "https://")):
@@ -431,15 +519,31 @@ class ModelConfigScreen(ModalScreen[bool]):
             return
         try:
             self.store.configure_endpoint(
-                model=str(selected_model),
+                endpoint_id=endpoint_id,
+                model=model_id,
                 base_url=base_url,
                 api_key=api_key,
-                available_models=self.available_models,
+                available_models=available_models,
             )
         except (OSError, ValueError) as exc:
             self.query_one("#config-error", Static).update(str(exc))
             return
         self.dismiss(True)
+
+    @on(Input.Changed, "#config-model-id")
+    def manual_model_changed(self, event: Input.Changed) -> None:
+        """Keep the picker and manual model field synchronized without cross-endpoint leakage."""
+        value = event.value.strip()
+        select = self.query_one("#config-model", Select)
+        if value in self.available_models:
+            select.value = value
+        elif value:
+            select.value = Select.NULL
+
+    @on(Select.Changed, "#config-model")
+    def selected_model_changed(self, event: Select.Changed) -> None:
+        if event.value is not Select.NULL:
+            self.query_one("#config-model-id", Input).value = str(event.value)
 
     @on(Button.Pressed, "#config-discover")
     def start_model_discovery(self) -> None:
@@ -463,9 +567,13 @@ class ModelConfigScreen(ModalScreen[bool]):
         try:
             models = await self.model_fetcher(base_url, api_key)
             self.available_models = models
+            self.available_models_endpoint_id = (
+                self.query_one("#config-endpoint-id", Input).value.strip() or self.endpoint_id
+            )
             select = self.query_one("#config-model", Select)
             select.set_options((model, model) for model in models)
             select.value = models[0]
+            self.query_one("#config-model-id", Input).value = models[0]
             error.update(f"已获取 {len(models)} 个模型，请选择后保存。")
         except Exception as exc:
             error.update(f"获取模型失败：{exc}")
@@ -509,18 +617,36 @@ class PricingConfigScreen(ModalScreen[bool]):
     }
     """
 
-    def __init__(self, model_id: str, store: UserSettingsStore) -> None:
+    def __init__(
+        self,
+        model_id: str,
+        endpoint_id: str | None,
+        store: UserSettingsStore,
+    ) -> None:
         super().__init__()
         self.model_id = model_id
+        self.endpoint_id = endpoint_id
         self.store = store
 
     def compose(self) -> ComposeResult:
-        metadata = self.store.load().models[self.model_id]
+        settings = self.store.load()
+        endpoint_id = self.endpoint_id or settings.default_endpoint
+        metadata = (
+            settings.endpoint_models.get(endpoint_id or "", {}).get(self.model_id)
+            or settings.models[self.model_id]
+        )
         pricing = metadata.pricing
         with Vertical(id="pricing-dialog"):
             yield Label(f"模型费用 · {self.model_id}", id="pricing-title")
             yield Label("输入价格（每 100 万 Token）")
             yield Input(value=str(pricing.input_per_million), id="pricing-input")
+            yield Label("缓存命中输入价格（每 100 万 Token，留空则按普通输入价）")
+            cached_price = (
+                ""
+                if pricing.cached_input_per_million is None
+                else str(pricing.cached_input_per_million)
+            )
+            yield Input(value=cached_price, id="pricing-cached-input")
             yield Label("输出价格（每 100 万 Token）")
             yield Input(value=str(pricing.output_per_million), id="pricing-output")
             yield Label("币种（例如 CNY、USD）")
@@ -542,6 +668,8 @@ class PricingConfigScreen(ModalScreen[bool]):
     def save(self) -> None:
         try:
             input_price = float(self.query_one("#pricing-input", Input).value)
+            raw_cached_price = self.query_one("#pricing-cached-input", Input).value.strip()
+            cached_input_price = float(raw_cached_price) if raw_cached_price else None
             output_price = float(self.query_one("#pricing-output", Input).value)
             context_window = int(self.query_one("#pricing-context", Input).value)
             currency = self.query_one("#pricing-currency", Input).value.strip()
@@ -549,6 +677,7 @@ class PricingConfigScreen(ModalScreen[bool]):
             self.store.configure_pricing(
                 self.model_id,
                 input_per_million=input_price,
+                cached_input_per_million=cached_input_price,
                 output_per_million=output_price,
                 currency=currency,
                 snapshot_date=snapshot_date,
@@ -560,9 +689,134 @@ class PricingConfigScreen(ModalScreen[bool]):
         self.dismiss(True)
 
 
+class SWEbenchConfigScreen(ModalScreen[tuple[Path, int, int] | None]):
+    """Collect the local SWE-bench manifest before starting the worker."""
+
+    BINDINGS: ClassVar[list[BindingType]] = [("escape", "cancel", "取消")]
+
+    CSS = """
+    SWEbenchConfigScreen {
+        align: center middle;
+        background: $background 70%;
+    }
+
+    #swebench-dialog {
+        width: 86;
+        height: 90%;
+        max-height: 90%;
+        min-height: 24;
+        border: round $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #swebench-title {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    #swebench-context {
+        color: $text-muted;
+        height: auto;
+        margin-bottom: 1;
+    }
+
+    #swebench-dialog Input {
+        margin-bottom: 1;
+    }
+
+    #swebench-body {
+        height: 1fr;
+        min-height: 12;
+        overflow-y: auto;
+    }
+
+    #swebench-error {
+        color: $error;
+        height: auto;
+        margin-bottom: 1;
+    }
+
+    #swebench-actions {
+        align-horizontal: right;
+        height: auto;
+    }
+
+    #swebench-actions Button {
+        margin-left: 1;
+    }
+    """
+
+    def __init__(self, workspace: Path, endpoint_id: str | None, model_id: str | None) -> None:
+        super().__init__()
+        self.workspace = workspace
+        self.endpoint_id = endpoint_id or "未选择"
+        self.model_id = model_id or "未选择"
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="swebench-dialog"):
+            yield Label("运行 SWE-bench", id="swebench-title")
+            yield Static(
+                f"当前端点：{self.endpoint_id} · 当前模型：{self.model_id}\n"
+                "实例清单必须是 JSONL，每行包含 instance_id、problem_statement，"
+                "并提供 workspace 或 repo + base_commit。",
+                id="swebench-context",
+            )
+            with VerticalScroll(id="swebench-body"):
+                yield Label("实例清单路径（JSONL）")
+                yield Input(
+                    placeholder="例如 D:/data/swebench/instances.jsonl",
+                    id="swebench-instances",
+                )
+                yield Label("每个实例最大 Agent 步数")
+                yield Input(value="200", placeholder="200", id="swebench-max-steps")
+                yield Label("并发实例数")
+                yield Input(value="2", placeholder="2", id="swebench-max-concurrency")
+            yield Static("", id="swebench-error")
+            with Horizontal(id="swebench-actions"):
+                yield Button("取消", id="swebench-cancel")
+                yield Button("开始运行", variant="primary", id="swebench-start")
+
+    @on(Button.Pressed, "#swebench-cancel")
+    def cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#swebench-start")
+    def start(self) -> None:
+        raw_path = self.query_one("#swebench-instances", Input).value.strip().strip('"')
+        raw_steps = self.query_one("#swebench-max-steps", Input).value.strip()
+        raw_concurrency = self.query_one("#swebench-max-concurrency", Input).value.strip()
+        error = self.query_one("#swebench-error", Static)
+        if not raw_path:
+            error.update("请填写实例清单路径。")
+            return
+        try:
+            max_steps = int(raw_steps)
+            max_concurrency = int(raw_concurrency)
+        except ValueError:
+            error.update("最大步数和并发实例数必须是正整数。")
+            return
+        path = Path(raw_path).expanduser()
+        if not path.is_absolute():
+            path = self.workspace / path
+        if not path.is_file():
+            error.update(f"实例清单不存在：{path}")
+            return
+        if max_steps < 1 or max_concurrency < 1:
+            error.update("最大步数和并发实例数必须是正整数。")
+            return
+        self.dismiss((path.resolve(), max_steps, max_concurrency))
+
+
 class ModelPickerScreen(ModalScreen[str | None]):
     BINDINGS: ClassVar[list[BindingType]] = [
         ("escape", "cancel", "取消"),
+        ("up", "move_up", "向上选择"),
+        ("down", "move_down", "向下选择"),
+        ("enter", "confirm", "确认选择"),
     ]
 
     CSS = """
@@ -572,7 +826,7 @@ class ModelPickerScreen(ModalScreen[str | None]):
     }
 
     #model-picker-dialog {
-        width: 76;
+        width: 86;
         height: auto;
         max-height: 80%;
         border: round $accent;
@@ -593,16 +847,44 @@ class ModelPickerScreen(ModalScreen[str | None]):
     #model-picker-hint {
         color: $text-muted;
     }
+
+    #model-picker-actions {
+        height: auto;
+        margin-top: 1;
+        align-horizontal: right;
+    }
+
+    #model-picker-actions Button {
+        margin-left: 1;
+    }
+
+    #model-picker-error {
+        color: $error;
+        height: auto;
+    }
     """
 
-    def __init__(self, models: list[str], current: str) -> None:
+    def __init__(
+        self,
+        models: list[str],
+        current: str,
+        endpoint_id: str | None = None,
+        store: UserSettingsStore | None = None,
+        model_fetcher: ModelFetcher | None = None,
+    ) -> None:
         super().__init__()
-        self.models = models
+        self.models = list(dict.fromkeys(models))
         self.current = current
+        self.endpoint_id = endpoint_id
+        self.store = store
+        self.model_fetcher = model_fetcher
 
     def compose(self) -> ComposeResult:
         with Vertical(id="model-picker-dialog"):
-            yield Label("选择模型", id="model-picker-title")
+            title = "选择模型"
+            if self.endpoint_id:
+                title += f" · 端点 {self.endpoint_id}"
+            yield Label(title, id="model-picker-title")
             yield OptionList(
                 *[
                     Option(
@@ -613,12 +895,151 @@ class ModelPickerScreen(ModalScreen[str | None]):
                 ],
                 id="model-picker-list",
             )
+            yield Input(value=self.current, placeholder="输入模型 ID", id="model-entry")
+            yield Static("", id="model-picker-error")
+            with Horizontal(id="model-picker-actions"):
+                yield Button("添加", id="model-add")
+                yield Button("更新 ID", id="model-update")
+                yield Button("删除", variant="warning", id="model-delete")
+                yield Button("刷新", id="model-refresh")
+                yield Button("关闭", id="model-close")
             yield Static("↑/↓ 选择  ·  Enter 确认  ·  Esc 取消", id="model-picker-hint")
 
     def on_mount(self) -> None:
         picker = self.query_one("#model-picker-list", OptionList)
-        picker.highlighted = self.models.index(self.current)
-        picker.focus()
+        picker.highlighted = self.models.index(self.current) if self.current in self.models else 0
+        self.set_focus(picker)
+
+    @on(OptionList.OptionHighlighted, "#model-picker-list")
+    def highlight_model(self, event: OptionList.OptionHighlighted) -> None:
+        self.query_one("#model-entry", Input).value = event.option_id or ""
+
+    @on(Button.Pressed, "#model-close")
+    def close(self) -> None:
+        self.dismiss(self.current or None)
+
+    @on(Button.Pressed, "#model-add")
+    def add_model(self) -> None:
+        model_id = self.query_one("#model-entry", Input).value.strip()
+        if not model_id:
+            self._show_error("请输入模型 ID。")
+            return
+        if model_id in self.models:
+            self._show_error(f"模型已存在：{model_id}")
+            return
+        self.models.append(model_id)
+        self.models.sort()
+        self.current = model_id
+        self._persist_models()
+        self._refresh_options(model_id)
+        self._show_error(f"已添加并保存模型：{model_id}", error=False)
+
+    @on(Button.Pressed, "#model-update")
+    def update_model(self) -> None:
+        picker = self.query_one("#model-picker-list", OptionList)
+        if picker.highlighted is None:
+            self._show_error("请先选择要修改的模型。")
+            return
+        model_id = self.query_one("#model-entry", Input).value.strip()
+        if not model_id:
+            self._show_error("请输入新的模型 ID。")
+            return
+        old_model = self.models[picker.highlighted]
+        if model_id != old_model and model_id in self.models:
+            self._show_error(f"模型已存在：{model_id}")
+            return
+        self.models[picker.highlighted] = model_id
+        self.models = sorted(set(self.models))
+        if self.current == old_model:
+            self.current = model_id
+        self._persist_models()
+        self._refresh_options(model_id)
+        self._show_error(f"已更新并保存模型：{model_id}", error=False)
+
+    @on(Button.Pressed, "#model-delete")
+    def delete_model(self) -> None:
+        picker = self.query_one("#model-picker-list", OptionList)
+        if picker.highlighted is None:
+            self._show_error("请先选择要删除的模型。")
+            return
+        if len(self.models) <= 1:
+            self._show_error("当前端点至少需要保留一个模型。")
+            return
+        removed = self.models.pop(picker.highlighted)
+        if self.current == removed:
+            self.current = self.models[0]
+        self._persist_models()
+        self._refresh_options(self.current)
+        self._show_error(f"已删除并保存模型：{removed}", error=False)
+
+    @on(Button.Pressed, "#model-refresh")
+    def refresh_models(self) -> None:
+        if self.model_fetcher is None or self.store is None or self.endpoint_id is None:
+            self._show_error("当前端点不支持在线刷新，请手动添加模型。")
+            return
+        self._refresh_from_service()
+
+    @work(exclusive=True, group="model-picker-refresh")
+    async def _refresh_from_service(self) -> None:
+        assert self.store is not None
+        assert self.model_fetcher is not None
+        assert self.endpoint_id is not None
+        try:
+            settings = self.store.load()
+            endpoint = settings.endpoints[self.endpoint_id]
+            models = await self.model_fetcher(endpoint.base_url, endpoint.api_key)
+            if not models:
+                raise ValueError("服务没有返回模型")
+            self.models = sorted(set(models))
+            if self.current not in self.models:
+                self.current = self.models[0]
+            self._persist_models()
+            self._refresh_options(self.current)
+            self._show_error(f"已刷新 {len(self.models)} 个模型并保存。", error=False)
+        except Exception as exc:
+            self._show_error(f"刷新模型失败，保留当前列表：{exc}")
+
+    def _persist_models(self) -> None:
+        if self.store is None or self.endpoint_id is None:
+            return
+        settings = self.store.load()
+        endpoint = settings.endpoints.get(self.endpoint_id)
+        if endpoint is None or not self.models:
+            return
+        self.store.configure_endpoint(
+            endpoint_id=self.endpoint_id,
+            model=self.current,
+            base_url=endpoint.base_url,
+            api_key=endpoint.api_key,
+            available_models=self.models,
+        )
+
+    def _refresh_options(self, selected: str | None = None) -> None:
+        picker = self.query_one("#model-picker-list", OptionList)
+        picker.set_options(
+            Option(f"{'● ' if model == self.current else '  '}{model}", id=model)
+            for model in self.models
+        )
+        if not self.models:
+            picker.highlighted = None
+            return
+        selected = selected if selected in self.models else self.models[0]
+        picker.highlighted = self.models.index(selected)
+        self.query_one("#model-entry", Input).value = selected
+
+    def _show_error(self, message: str, *, error: bool = True) -> None:
+        widget = self.query_one("#model-picker-error", Static)
+        widget.update(message)
+        widget.set_class(error, "error-notice")
+
+    def action_move_up(self) -> None:
+        self.query_one("#model-picker-list", OptionList).action_cursor_up()
+
+    def action_move_down(self) -> None:
+        self.query_one("#model-picker-list", OptionList).action_cursor_down()
+
+    def action_confirm(self) -> None:
+        self.query_one("#model-picker-list", OptionList).action_select()
 
     @on(OptionList.OptionSelected, "#model-picker-list")
     def select_model(self, event: OptionList.OptionSelected) -> None:
@@ -806,6 +1227,7 @@ class RunDetailScreen(ModalScreen[None]):
             f"模型        {summary.model_id} ({summary.provider})",
             f"时间        {summary.finished_at.astimezone():%Y-%m-%d %H:%M:%S}",
             f"统计        {summary.steps} steps · {tokens} tokens · {price}",
+            f"输入缓存    {summary.cached_input_tokens} / {summary.input_tokens} tokens",
             f"耗时        {summary.latency_seconds:.3f}s",
             f"工具        {summary.tool_successes} 成功 / {summary.tool_failures} 失败",
             f"任务        {summary.task}",
@@ -818,6 +1240,11 @@ class RunDetailScreen(ModalScreen[None]):
         for event in self.events_:
             if isinstance(event, StepTraceEvent):
                 step_tokens = event.input_tokens + event.output_tokens
+                cached = (
+                    f" · cached {event.cached_input_tokens}/{event.input_tokens}"
+                    if event.cached_input_tokens
+                    else ""
+                )
                 first = (
                     f" · first {event.first_token_latency_seconds:.3f}s"
                     if event.first_token_latency_seconds is not None
@@ -825,7 +1252,7 @@ class RunDetailScreen(ModalScreen[None]):
                 )
                 lines.append(
                     f"  #{event.step}  {event.latency_seconds:.3f}s{first} · "
-                    f"{step_tokens} tokens · {event.cost:.6f} {event.currency}"
+                    f"{step_tokens} tokens{cached} · {event.cost:.6f} {event.currency}"
                 )
             elif isinstance(event, ToolRequestEvent):
                 lines.append(f"    ◌ {event.tool_name}  {_tool_target(event.arguments)}")
@@ -835,8 +1262,7 @@ class RunDetailScreen(ModalScreen[None]):
                     (line.strip() for line in event.content.splitlines() if line.strip()), ""
                 )
                 lines.append(
-                    f"    {glyph} {event.tool_name}  {event.latency_seconds:.3f}s  "
-                    f"{excerpt[:140]}"
+                    f"    {glyph} {event.tool_name}  {event.latency_seconds:.3f}s  {excerpt[:140]}"
                 )
         if summary.final_diff:
             lines.append("\n最终 diff\n" + _bounded_text(summary.final_diff, 8000))
@@ -961,22 +1387,26 @@ class CapyCodeApp(App[None]):
         workspace: Path | None = None,
         model_id: str | None = None,
         models_path: Path = DEFAULT_MODELS_PATH,
+        profiles_path: Path = Path("config/profiles.yaml"),
         max_steps: int = 10,
         settings_store: UserSettingsStore | None = None,
         session_store: SessionStore | None = None,
         initial_resume: str | None = None,
         task_runner: TaskRunner = execute_task,
         model_fetcher: ModelFetcher = discover_models,
+        endpoint_id: str | None = None,
     ) -> None:
         super().__init__()
         self.workspace = (workspace or Path.cwd()).resolve()
         self.models_path = models_path
+        self.profiles_path = profiles_path
         self.max_steps = max_steps
         self.settings_store = settings_store or UserSettingsStore()
         self.session_store = session_store or SessionStore(
             self.settings_store.path.parent / "sessions"
         )
         settings = self.settings_store.load()
+        self.endpoint_id = endpoint_id or settings.default_endpoint
         self.model_id = model_id or settings.default_model
         self.task_runner = task_runner
         self.model_fetcher = model_fetcher
@@ -994,6 +1424,7 @@ class CapyCodeApp(App[None]):
         self.splash_visible = True
         self.live_run_id: str | None = None
         self.live_input_tokens = 0
+        self.live_cached_input_tokens = 0
         self.live_output_tokens = 0
         self.live_cost = 0.0
         self.live_currency = ""
@@ -1153,7 +1584,7 @@ class CapyCodeApp(App[None]):
         command, _, argument = raw.partition(" ")
         command = command.lower()
         argument = argument.strip()
-        if command == "/help":
+        if command in {"/", "/help"}:
             lines = [f"{item.usage:<24} {item.description}" for item in COMMANDS]
             self._write_system("可用命令：\n" + "\n".join(lines))
         elif command == "/clear":
@@ -1164,6 +1595,12 @@ class CapyCodeApp(App[None]):
             self._write_system(self._status_text())
         elif command == "/models":
             await self._show_models()
+        elif command == "/endpoints":
+            self._show_endpoints()
+        elif command == "/endpoint":
+            self._select_endpoint(argument)
+        elif command == "/profiles":
+            self._show_profiles()
         elif command == "/model":
             await self._select_model(argument)
         elif command == "/pricing":
@@ -1182,26 +1619,101 @@ class CapyCodeApp(App[None]):
             self._new_session()
         elif command == "/config":
             self._open_config()
+        elif command == "/benchmark":
+            self._dispatch_benchmark(argument)
         else:
             self._write_error(f"未知命令：{command}。输入 /help 查看可用命令。")
+
+    def _dispatch_benchmark(self, argument: str) -> None:
+        """Route the slash command to the P0 runner or the SWE-bench form."""
+        mode, _, rest = argument.partition(" ")
+        if mode.casefold() == "swebench":
+            manifest = rest.strip().strip('"')
+            if manifest:
+                self.run_swebench(Path(manifest).expanduser(), max_steps=200)
+            else:
+                self._open_swebench_config()
+            return
+        if mode.casefold() in {"p0", "all"}:
+            self.run_benchmark("all" if mode.casefold() == "all" else rest.strip())
+            return
+        self.run_benchmark(argument)
 
     async def _show_models(self) -> None:
         configured = await self._refresh_models()
         if configured is None:
             return
+        settings = self.settings_store.load()
         lines = [
             f"{'●' if model == self.model_id else ' '} {model}"
             for model in configured.available_models
         ]
-        self._write_system("可用模型：\n" + "\n".join(lines))
+        endpoint_id = self.endpoint_id or settings.default_endpoint or "default"
+        prefix = f"当前端点 {endpoint_id} 的可用模型：" if endpoint_id else "可用模型："
+        self._write_system(prefix + "\n" + "\n".join(lines))
+
+    def _show_endpoints(self) -> None:
+        settings = self.settings_store.load()
+        if not settings.endpoints:
+            self._write_error("尚未配置端点。请先运行 /config。")
+            return
+        lines = [
+            f"{'●' if endpoint_id == settings.default_endpoint else ' '} "
+            f"{endpoint_id} · {endpoint.base_url}"
+            for endpoint_id, endpoint in settings.endpoints.items()
+        ]
+        self._write_system("已保存端点：\n" + "\n".join(lines))
+
+    def _select_endpoint(self, endpoint_id: str) -> None:
+        if not endpoint_id:
+            self._show_endpoints()
+            return
+        try:
+            settings = self.settings_store.select_endpoint(endpoint_id)
+        except (OSError, ValueError) as exc:
+            self._write_error(str(exc))
+            return
+        self.endpoint_id = settings.default_endpoint
+        self.model_id = settings.default_model
+        self._write_system(f"已切换端点：{endpoint_id} · 模型 {self.model_id}")
+        self._refresh_status()
+
+    def _show_profiles(self) -> None:
+        current = self.last_session.current_profile if self.last_session else None
+        lines = []
+        registry = build_default_profile_registry()
+        try:
+            if self.profiles_path.is_file():
+                registry = ProfileRegistry.from_config(load_profiles(self.profiles_path))
+        except (OSError, ValueError) as exc:
+            self._write_error(f"读取 Profile 配置失败，使用内置配置：{exc}")
+        for profile in registry.all():
+            marker = "●" if profile.profile_id == current else " "
+            lines.append(f"{marker} {profile.profile_id} · {profile.capability.value}")
+        self._write_system("当前能力 Profile：\n" + "\n".join(lines))
 
     async def _select_model(self, model_id: str) -> None:
         if not model_id:
-            configured = await self._refresh_models()
+            try:
+                settings = self.settings_store.load()
+                endpoint_id = self.endpoint_id or settings.default_endpoint or "default"
+                configured = settings.endpoints.get(endpoint_id)
+                if configured is None:
+                    configured = settings.endpoint
+            except (OSError, ValueError) as exc:
+                self._write_error(str(exc))
+                return
             if configured is None:
+                self._write_error("尚未配置模型。请先运行 /config。")
                 return
             self.push_screen(
-                ModelPickerScreen(configured.available_models, self.model_id or ""),
+                ModelPickerScreen(
+                    configured.available_models,
+                    self.model_id or "",
+                    endpoint_id=endpoint_id,
+                    store=self.settings_store,
+                    model_fetcher=self.model_fetcher,
+                ),
                 self._model_picker_closed,
             )
             return
@@ -1210,7 +1722,9 @@ class CapyCodeApp(App[None]):
     async def _refresh_models(self) -> UserEndpointSettings | None:
         try:
             settings = self.settings_store.load()
-            configured = settings.endpoint
+            configured = settings.endpoints.get(self.endpoint_id or settings.default_endpoint or "")
+            if configured is None:
+                configured = settings.endpoint
         except (OSError, ValueError) as exc:
             self._write_error(str(exc))
             return None
@@ -1223,12 +1737,14 @@ class CapyCodeApp(App[None]):
             models = await self.model_fetcher(configured.base_url, configured.api_key)
             selected = self.model_id if self.model_id in models else models[0]
             settings = self.settings_store.configure_endpoint(
+                endpoint_id=self.endpoint_id or settings.default_endpoint or "default",
                 model=selected,
                 base_url=configured.base_url,
                 api_key=configured.api_key,
                 available_models=models,
             )
             self.model_id = selected
+            self.endpoint_id = settings.default_endpoint
             self._refresh_status()
             return settings.endpoint
         except Exception as exc:
@@ -1238,10 +1754,18 @@ class CapyCodeApp(App[None]):
     def _model_picker_closed(self, model_id: str | None) -> None:
         if model_id is not None:
             self._apply_model_selection(model_id)
+            return
+        try:
+            settings = self.settings_store.load()
+            self.endpoint_id = settings.default_endpoint
+            self.model_id = settings.default_model
+            self._refresh_status()
+        except (OSError, ValueError):
+            pass
 
     def _apply_model_selection(self, model_id: str) -> None:
         try:
-            self.settings_store.select_model(model_id)
+            self.settings_store.select_model(model_id, endpoint_id=self.endpoint_id)
         except (OSError, ValueError) as exc:
             self._write_error(str(exc))
             return
@@ -1350,15 +1874,230 @@ class CapyCodeApp(App[None]):
     def _open_config(self) -> None:
         self.push_screen(
             ModelConfigScreen(
-                self.settings_store,
-                self.model_fetcher,
+                self.settings_store, self.model_fetcher, endpoint_id=self.endpoint_id
             ),
             self._config_closed,
         )
 
+    def _open_swebench_config(self) -> None:
+        if self.busy:
+            self._write_error("当前已有任务在执行，请等待完成后再运行 benchmark。")
+            return
+        self.push_screen(
+            SWEbenchConfigScreen(self.workspace, self.endpoint_id, self.model_id),
+            self._swebench_config_closed,
+        )
+
+    def _swebench_config_closed(self, value: tuple[Path, int, int] | None) -> None:
+        if value is not None:
+            instances, max_steps, max_concurrency = value
+            self.run_swebench(instances, max_steps=max_steps, max_concurrency=max_concurrency)
+
+    @work(exclusive=True, group="benchmark")
+    async def run_benchmark(self, argument: str = "") -> None:
+        if self.busy:
+            self._write_error("当前已有任务在执行，请等待完成后再运行 benchmark。")
+            return
+        try:
+            settings = self.settings_store.load()
+            configured = settings.endpoints.get(self.endpoint_id or settings.default_endpoint or "")
+            if configured is None or not self.model_id:
+                raise ValueError("尚未配置模型。请先运行 /config。")
+            self._write_system("正在验证模型连接和真实模型 ID…")
+            try:
+                models = await self.model_fetcher(configured.base_url, configured.api_key)
+            except Exception as exc:
+                if self.model_id not in configured.available_models:
+                    raise ValueError(
+                        f"无法获取模型列表，且当前模型未保存到端点配置：{exc}"
+                    ) from exc
+                models = list(configured.available_models)
+                self._write_system("端点未提供 /models，使用已保存的模型 ID 继续验证聊天接口。")
+            if self.model_id not in models:
+                raise ValueError(
+                    f"当前模型 {self.model_id!r} 不在服务端模型列表中，请先运行 /models 或 /model。"
+                )
+            settings = self.settings_store.configure_endpoint(
+                model=self.model_id,
+                endpoint_id=self.endpoint_id or settings.default_endpoint or "default",
+                base_url=configured.base_url,
+                api_key=configured.api_key,
+                available_models=models,
+            )
+            selected = None if not argument or argument.casefold() == "all" else [argument]
+            catalog = GateTaskCatalog()
+            if selected:
+                catalog.select(selected)
+            self.busy = True
+            self._refresh_status()
+
+            def progress(message: str) -> None:
+                self._write_system(f"benchmark · {message}")
+
+            runner = P0GateRunner(
+                catalog=catalog,
+                output_root=self.workspace / ".capy" / "benchmarks" / "p0",
+                progress=progress,
+            )
+
+            async def executor(
+                task: str, workspace: Path, model: str | None, max_steps: int
+            ) -> SessionState:
+                return await execute_task(
+                    task,
+                    workspace,
+                    model,
+                    self.models_path,
+                    max_steps,
+                    settings_store=self.settings_store,
+                )
+
+            report, report_root = await runner.run(
+                executor,
+                model_id=self.model_id,
+                repeats=1,
+                task_ids=selected,
+            )
+            smoke_passed = (
+                not report.gate_eligible
+                and report.passed_runs == report.total_runs
+                and report.task_coverage == 1
+            )
+            result = (
+                "通过"
+                if report.gate_passed
+                else ("冒烟通过（完整 Gate 未评估）" if smoke_passed else "未通过")
+            )
+            report_url = _path_to_file_url(report_root / "report.md")
+            self._write_system(
+                f"benchmark 完成：{result} · 通过率 {report.passed_runs}/{report.total_runs} "
+                f"({report.pass_rate:.1%}) · Pass@1 {report.pass_at_1:.1%}\n"
+                f"tokens {report.total_input_tokens} input / "
+                f"{report.total_cached_input_tokens} cached / "
+                f"{report.total_output_tokens} output · "
+                f"费用 {report.total_cost:.6f} · 延迟 {report.total_latency_seconds:.2f}s\n"
+                f"报告：[{report_root / 'report.md'}]({report_url})"
+            )
+        except Exception as exc:
+            self._write_error(f"benchmark 启动失败：{exc}")
+        finally:
+            self.busy = False
+            self._refresh_status()
+            self.query_one("#prompt", Input).focus()
+
+    @work(exclusive=True, group="benchmark")
+    async def run_swebench(
+        self, instances: Path, *, max_steps: int = 200, max_concurrency: int = 2
+    ) -> None:
+        """Run SWE-bench tasks with the endpoint/model currently selected in the TUI."""
+        if self.busy:
+            self._write_error("当前已有任务在执行，请等待完成后再运行 benchmark。")
+            return
+        try:
+            instances = await asyncio.to_thread(_resolve_manifest_path, instances, self.workspace)
+            settings = self.settings_store.load()
+            resolved = resolve_model(self.model_id, settings, self.endpoint_id)
+            if not resolved.base_url or not resolved.api_key:
+                raise ValueError("当前端点缺少 Base URL 或 API Key，请先运行 /config。")
+            configured = settings.endpoints[resolved.endpoint_id]
+            self._write_system("正在验证当前端点和真实模型 ID…")
+            try:
+                remote_models = await self.model_fetcher(resolved.base_url, resolved.api_key)
+            except Exception as exc:
+                if resolved.model not in configured.available_models:
+                    raise ValueError(
+                        f"无法获取模型列表，且当前模型未保存到端点配置：{exc}"
+                    ) from exc
+                remote_models = list(configured.available_models)
+                self._write_system("端点未提供 /models，使用已保存的模型 ID 继续运行。")
+            if resolved.model not in remote_models:
+                raise ValueError(
+                    f"当前模型 {resolved.model!r} 不在端点模型列表中，请先运行 /models 或 /model。"
+                )
+            tasks = await asyncio.to_thread(SWEbenchRunner.load_tasks, instances)
+            self.endpoint_id = resolved.endpoint_id
+            self.model_id = resolved.model
+            self.busy = True
+            self._refresh_status()
+            self._write_system(
+                f"SWE-bench 开始：{len(tasks)} 个实例 · 端点 {resolved.endpoint_id} "
+                f"· 模型 {resolved.model} · 最大步数 {max_steps} · 并发 {max_concurrency} · Docker"
+            )
+
+            def progress(message: str) -> None:
+                self._write_system(f"SWE-bench · {message}")
+
+            runner = SWEbenchRunner(
+                output_root=self.workspace / ".capy" / "benchmarks" / "swebench",
+                progress=progress,
+            )
+            profiled_artifact_path = self.workspace / ".capy" / "profiles.json"
+            profiled_artifact = (
+                profiled_artifact_path
+                if await asyncio.to_thread(profiled_artifact_path.is_file)
+                else None
+            )
+
+            async def executor(
+                task: str, workspace: Path, model: str | None, task_max_steps: int
+            ) -> SessionState:
+                return await execute_task(
+                    task,
+                    workspace,
+                    model,
+                    self.models_path,
+                    task_max_steps,
+                    settings_store=self.settings_store,
+                    profiles_path=self.profiles_path,
+                    profiled_routing_path=profiled_artifact,
+                    endpoint_id=resolved.endpoint_id,
+                    profile_step_limit=task_max_steps,
+                    container_image="capycode/swebench-python:3.11",
+                )
+
+            report, report_root = await runner.run(
+                executor,
+                tasks=tasks,
+                model_id=resolved.model,
+                max_steps=max_steps,
+                max_concurrency=max_concurrency,
+            )
+            execution_failures = (
+                report.failed_tasks + report.model_errors + report.infrastructure_errors
+            )
+            outcome = (
+                "Agent 执行完成，待官方评测"
+                if execution_failures == 0
+                else f"Agent 执行结束，{execution_failures} 个实例未完成"
+            )
+            predictions_url = _path_to_file_url(report_root / "predictions.jsonl")
+            report_url = _path_to_file_url(report_root / "report.md")
+            self._write_system(
+                f"SWE-bench 完成：{outcome} · 完成 {report.completed_tasks}/{report.total_tasks}\n"
+                f"失败 {report.failed_tasks} · 模型请求错误 {report.model_errors} · "
+                f"基础设施错误 {report.infrastructure_errors}\n"
+                f"tokens {report.total_input_tokens} input / "
+                f"{report.total_cached_input_tokens} cached / "
+                f"{report.total_output_tokens} output · "
+                f"费用 {report.total_cost:.6f} {report.currency} · "
+                f"延迟 {report.total_latency_seconds:.2f}s\n"
+                f"预测文件：[{report_root / 'predictions.jsonl'}]({predictions_url})\n"
+                f"报告：[{report_root / 'report.md'}]({report_url})\n"
+                "请将 predictions.jsonl 交给官方 SWE-bench Docker harness，"
+                "获取 resolved/unresolved 结果。"
+            )
+        except Exception as exc:
+            self._write_error(f"SWE-bench 启动失败：{exc}")
+        finally:
+            self.busy = False
+            self._refresh_status()
+            self.query_one("#prompt", Input).focus()
+
     def _config_closed(self, saved: bool | None) -> None:
         if saved:
-            self.model_id = self.settings_store.load().default_model
+            settings = self.settings_store.load()
+            self.endpoint_id = settings.default_endpoint
+            self.model_id = settings.default_model
             self._write_system(f"模型配置已保存到 {self.settings_store.path}")
             self._refresh_status()
 
@@ -1367,16 +2106,26 @@ class CapyCodeApp(App[None]):
             self._write_error("尚未选择真实模型。请先运行 /config。")
             return
         self.push_screen(
-            PricingConfigScreen(self.model_id, self.settings_store),
+            PricingConfigScreen(self.model_id, self.endpoint_id, self.settings_store),
             self._pricing_closed,
         )
 
     def _pricing_closed(self, saved: bool | None) -> None:
         if saved and self.model_id is not None:
-            pricing = self.settings_store.load().models[self.model_id].pricing
+            settings = self.settings_store.load()
+            pricing = (
+                settings.endpoint_models.get(self.endpoint_id or "", {}).get(self.model_id)
+                or settings.models[self.model_id]
+            ).pricing
+            cached = (
+                "按普通输入价"
+                if pricing.cached_input_per_million is None
+                else f"缓存 {pricing.cached_input_per_million:g}"
+            )
             self._write_system(
                 f"已保存 {self.model_id} 的费用：输入 {pricing.input_per_million:g} / "
-                f"输出 {pricing.output_per_million:g} {pricing.currency} / 1M tokens"
+                f"{cached} / 输出 {pricing.output_per_million:g} "
+                f"{pricing.currency} / 1M tokens"
             )
 
     @work(exclusive=True, group="agent-run")
@@ -1390,13 +2139,14 @@ class CapyCodeApp(App[None]):
         self.event_stream_active = False
         self.live_run_id = None
         self.live_input_tokens = 0
+        self.live_cached_input_tokens = 0
         self.live_output_tokens = 0
         self.live_cost = 0.0
         self.live_currency = ""
         self.run_started_counter = time.perf_counter()
         self._refresh_status()
         try:
-            state = await self.task_runner(
+            runner_args = (
                 task,
                 self.workspace,
                 self.model_id,
@@ -1407,6 +2157,12 @@ class CapyCodeApp(App[None]):
                 self.last_session,
                 self._checkpoint_session,
             )
+            if self.task_runner is execute_task:
+                state = await execute_task(
+                    *runner_args, profiles_path=self.profiles_path, endpoint_id=self.endpoint_id
+                )
+            else:
+                state = await self.task_runner(*runner_args)
             self.last_session = state
             if state.final_answer and not self.received_stream_delta:
                 self._write_assistant(state.final_answer)
@@ -1481,6 +2237,7 @@ class CapyCodeApp(App[None]):
             transcript.scroll_end(animate=False)
         elif isinstance(event, StepTraceEvent):
             self.live_input_tokens += event.input_tokens
+            self.live_cached_input_tokens += event.cached_input_tokens
             self.live_output_tokens += event.output_tokens
             self.live_cost += event.cost
             self.live_currency = event.currency
@@ -1575,17 +2332,24 @@ class CapyCodeApp(App[None]):
         run_id = (self.live_run_id or saved_run or "-")[:8]
         terminal_width = width or self.size.width
         model = self.model_id or "未配置"
+        endpoint = self.endpoint_id or "未配置端点"
+        capability = self.last_session.current_capability if self.last_session else None
         tokens = self.live_input_tokens + self.live_output_tokens
         elapsed = (
             time.perf_counter() - self.run_started_counter
             if self.busy and self.run_started_counter is not None
             else (self.last_session.last_run_latency if self.last_session else 0)
         )
-        core = f"{state} · {model} · run {run_id}"
+        core = f"{state} · {endpoint}/{model} · run {run_id}"
+        if capability and terminal_width >= 105:
+            core += f" · {capability}"
         if terminal_width < 72:
             return core
+        cached = (
+            f" · cache {self.live_cached_input_tokens} tok" if self.live_cached_input_tokens else ""
+        )
         metrics = (
-            f" · {tokens} tok · {self.live_cost:.4f} "
+            f" · {tokens} tok{cached} · {self.live_cost:.4f} "
             f"{self.live_currency or '-'} · {elapsed:.1f}s"
         )
         if terminal_width < 105:
@@ -1607,7 +2371,8 @@ class CapyCodeApp(App[None]):
     def _refresh_session_bar(self) -> None:
         workspace_name = self.workspace.name or str(self.workspace)
         self.query_one("#session-bar", Static).update(
-            f"CapyCode  ·  {self.model_id or '未配置模型'}  ·  {workspace_name}"
+            f"CapyCode  ·  {self.endpoint_id or '未配置端点'}/"
+            f"{self.model_id or '未配置模型'}  ·  {workspace_name}"
         )
 
 
@@ -1616,11 +2381,15 @@ def launch_tui(
     workspace: Path | None = None,
     model_id: str | None = None,
     models_path: Path = DEFAULT_MODELS_PATH,
+    profiles_path: Path = Path("config/profiles.yaml"),
     initial_resume: str | None = None,
+    endpoint_id: str | None = None,
 ) -> None:
     CapyCodeApp(
         workspace=workspace,
         model_id=model_id,
         models_path=models_path,
+        profiles_path=profiles_path,
         initial_resume=initial_resume,
+        endpoint_id=endpoint_id,
     ).run()

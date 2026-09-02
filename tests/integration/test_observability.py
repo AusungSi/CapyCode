@@ -20,6 +20,7 @@ def tracking_config() -> RunTrackingConfig:
         model_id="fake-model",
         input_per_million=2.0,
         output_per_million=4.0,
+        cached_input_per_million=0.5,
         currency="CNY",
         pricing_snapshot_date="2026-08-28",
         sensitive_values=("local-secret",),
@@ -36,12 +37,12 @@ async def test_coding_run_writes_paired_trace_and_summary(tmp_path: Path) -> Non
                     ToolCall(id="read-one", name="read_file", arguments={"path": "README.md"})
                 ],
                 finish_reason="tool_calls",
-                usage=Usage(input_tokens=100, output_tokens=20),
+                usage=Usage(input_tokens=100, cached_input_tokens=80, output_tokens=20),
             ),
             LLMResponse(
                 content="Done",
                 finish_reason="stop",
-                usage=Usage(input_tokens=200, output_tokens=30),
+                usage=Usage(input_tokens=200, cached_input_tokens=100, output_tokens=30),
             ),
         ]
     )
@@ -63,8 +64,9 @@ async def test_coding_run_writes_paired_trace_and_summary(tmp_path: Path) -> Non
     assert state.status == "completed"
     assert state.current_run_id == summary.run_id
     assert summary.input_tokens == 300
+    assert summary.cached_input_tokens == 180
     assert summary.output_tokens == 50
-    assert summary.cost == pytest.approx(0.0008)
+    assert summary.cost == pytest.approx(0.00053)
     assert summary.tool_requests == 1
     assert summary.tool_successes == 1
     assert [event.sequence for event in events] == list(range(1, len(events) + 1))

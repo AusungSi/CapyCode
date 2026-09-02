@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 from uuid import uuid4
 
 from capycode.llm import LLMResponse
+from capycode.llm.types import ReasoningEffort
 from capycode.tools import ToolResult
 
 if TYPE_CHECKING:
@@ -37,6 +38,10 @@ class RunTrackingConfig:
     output_per_million: float
     currency: str
     pricing_snapshot_date: str
+    cached_input_per_million: float | None = None
+    model_pricing: dict[str, tuple[float, float] | tuple[float, float, float | None]] = field(
+        default_factory=dict
+    )
     sensitive_values: tuple[str, ...] = ()
     event_sink: Callable[[RunEvent], None] | None = None
 
@@ -64,6 +69,7 @@ class RunTracker:
         self._started_counter = time.perf_counter()
         self.task = ""
         self.input_tokens = 0
+        self.cached_input_tokens = 0
         self.output_tokens = 0
         self.cost = 0.0
         self.retry_count = 0
@@ -177,12 +183,21 @@ class RunTracker:
         latency_seconds: float,
         first_token_latency_seconds: float | None,
         tools: list[ToolCallTrace],
+        capability: str | None = None,
+        profile_id: str | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        escalation_level: int = 0,
+        model_id: str | None = None,
+        route_reason: str | None = None,
     ) -> None:
         cost = self.calculate_cost(
             response.usage.input_tokens,
+            response.usage.cached_input_tokens,
             response.usage.output_tokens,
+            model_id=model_id,
         )
         self.input_tokens += response.usage.input_tokens
+        self.cached_input_tokens += response.usage.cached_input_tokens
         self.output_tokens += response.usage.output_tokens
         self.cost += cost
         self._append(
@@ -192,15 +207,21 @@ class RunTracker:
                 sequence=self.recorder.next_sequence,
                 step=step,
                 provider=self.config.provider,
-                model_id=self.config.model_id,
+                model_id=model_id or self.config.model_id,
+                route_reason=route_reason,
                 latency_seconds=latency_seconds,
                 first_token_latency_seconds=first_token_latency_seconds,
                 input_tokens=response.usage.input_tokens,
+                cached_input_tokens=response.usage.cached_input_tokens,
                 output_tokens=response.usage.output_tokens,
                 cost=cost,
                 currency=self.config.currency,
                 finish_reason=response.finish_reason,
                 retry_count=0,
+                capability=capability,
+                profile_id=profile_id,
+                reasoning_effort=reasoning_effort,
+                escalation_level=escalation_level,
                 tools=tools,
             )
         )
@@ -258,6 +279,7 @@ class RunTracker:
             latency_seconds=time.perf_counter() - self._started_counter,
             steps=state.step,
             input_tokens=self.input_tokens,
+            cached_input_tokens=self.cached_input_tokens,
             output_tokens=self.output_tokens,
             cost=self.cost,
             currency=self.config.currency,
@@ -280,10 +302,27 @@ class RunTracker:
         self._summary = summary
         return summary
 
-    def calculate_cost(self, input_tokens: int, output_tokens: int) -> float:
+    def calculate_cost(
+        self,
+        input_tokens: int,
+        cached_input_tokens: int,
+        output_tokens: int,
+        *,
+        model_id: str | None = None,
+    ) -> float:
+        configured = self.config.model_pricing.get(model_id or self.config.model_id)
+        if configured is None:
+            input_price = self.config.input_per_million
+            output_price = self.config.output_per_million
+            cached_price = self.config.cached_input_per_million
+        else:
+            input_price, output_price, *cached_prices = configured
+            cached_price = cached_prices[0] if cached_prices else None
+        cached = min(max(cached_input_tokens, 0), input_tokens)
+        uncached = input_tokens - cached
+        effective_cached_price = input_price if cached_price is None else cached_price
         return (
-            input_tokens * self.config.input_per_million
-            + output_tokens * self.config.output_per_million
+            uncached * input_price + cached * effective_cached_price + output_tokens * output_price
         ) / 1_000_000
 
     def _append(self, event: RunEvent) -> None:

@@ -6,8 +6,48 @@ profiles:
     tools: [list_files, search_code, read_file]
     context_policy: retrieval
     budget:
-      max_output_tokens: 2048
+      max_output_tokens: 32000
       max_steps: 3
+
+  understanding_fast:
+    capability: code_understanding
+    model: model-a
+    instruction: prompts/understanding.md
+    tools: [list_files, search_code, read_file]
+    context_policy: retrieval
+    budget:
+      max_output_tokens: 32000
+      max_steps: 4
+
+  planning_balanced:
+    capability: task_planning
+    model: model-b
+    instruction: prompts/planning.md
+    tools: [list_files, search_code, read_file, git_diff]
+    context_policy: full
+    budget:
+      max_output_tokens: 32000
+      max_steps: 5
+
+  editing_balanced:
+    capability: code_editing
+    model: model-b
+    instruction: prompts/editing.md
+    tools: [read_file, search_code, write_file, replace_text, git_diff]
+    context_policy: full
+    budget:
+      max_output_tokens: 32000
+      max_steps: 6
+
+  verification_fast:
+    capability: verification
+    model: model-a
+    instruction: prompts/verification.md
+    tools: [run_tests, run_command, git_diff, read_file]
+    context_policy: diagnosis
+    budget:
+      max_output_tokens: 32000
+      max_steps: 4
 
   diagnosis_deep:
     capability: failure_diagnosis
@@ -16,5 +56,5 @@ profiles:
     tools: [read_file, search_code, run_command]
     context_policy: diagnosis
     budget:
-      max_output_tokens: 4096
+      max_output_tokens: 32000
       max_steps: 4

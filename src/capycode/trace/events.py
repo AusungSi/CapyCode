@@ -6,6 +6,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
+from capycode.llm.types import ReasoningEffort
+
 
 class TraceModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -73,14 +75,20 @@ class StepTraceEvent(BaseRunEvent):
     step: int = Field(ge=1)
     provider: str
     model_id: str
+    route_reason: str | None = None
     latency_seconds: float = Field(ge=0)
     first_token_latency_seconds: float | None = Field(default=None, ge=0)
     input_tokens: int = Field(ge=0)
+    cached_input_tokens: int = Field(default=0, ge=0)
     output_tokens: int = Field(ge=0)
     cost: float = Field(ge=0)
     currency: str
     finish_reason: str | None = None
     retry_count: int = Field(default=0, ge=0)
+    capability: str | None = None
+    profile_id: str | None = None
+    reasoning_effort: ReasoningEffort | None = None
+    escalation_level: int = Field(default=0, ge=0)
     tools: list[ToolCallTrace] = Field(default_factory=list)
 
 
@@ -119,6 +127,7 @@ class RunSummary(TraceModel):
     latency_seconds: float = Field(ge=0)
     steps: int = Field(ge=0)
     input_tokens: int = Field(ge=0)
+    cached_input_tokens: int = Field(default=0, ge=0)
     output_tokens: int = Field(ge=0)
     cost: float = Field(ge=0)
     currency: str

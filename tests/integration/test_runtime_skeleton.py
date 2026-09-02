@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from capycode.core import AgentRuntime, SessionState
-from capycode.llm import LLMResponse, ScriptedLLM, ToolCall, Usage
+from capycode.llm import MAX_OUTPUT_TOKENS_UPPER_LIMIT, LLMResponse, ScriptedLLM, ToolCall, Usage
 from capycode.tools import build_p0_runtime_tools
 
 
@@ -113,6 +113,27 @@ async def test_runtime_stops_at_step_limit(tmp_path: Path) -> None:
     assert state.status == "failed"
     assert state.step == 1
     assert state.last_error == "maximum step limit reached: 1"
+
+
+@pytest.mark.asyncio
+async def test_runtime_retries_an_empty_length_limited_response_at_upper_budget(
+    tmp_path: Path,
+) -> None:
+    client = ScriptedLLM(
+        [
+            LLMResponse(finish_reason="length"),
+            LLMResponse(content="Completed after the larger output budget."),
+        ]
+    )
+    runtime = AgentRuntime(client, build_p0_runtime_tools(), max_steps=2)
+
+    state = await runtime.run("Complete the task", tmp_path, "fake-model")
+
+    assert state.status == "completed"
+    assert len(client.requests) == 2
+    assert client.requests[0].max_output_tokens == 32_000
+    assert client.requests[1].max_output_tokens == MAX_OUTPUT_TOKENS_UPPER_LIMIT
+    assert [message.role for message in client.requests[1].messages] == ["system", "user"]
 
 
 @pytest.mark.asyncio

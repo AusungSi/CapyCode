@@ -1,0 +1,43 @@
+profiles:
+  retrieval_fast:
+    capability: repository_retrieval
+    model: deepseek-flash
+    instruction: prompts/retrieval.md
+    tools: [list_files, search_code, read_file, write_file, replace_text, run_tests, run_command, git_diff]
+    context_policy: retrieval
+    budget: {max_output_tokens: 32000, max_steps: 4}
+  understanding_fast:
+    capability: code_understanding
+    model: deepseek-flash
+    instruction: prompts/understanding.md
+    tools: [list_files, search_code, read_file, write_file, replace_text, run_tests, run_command, git_diff]
+    context_policy: retrieval
+    budget: {max_output_tokens: 32000, max_steps: 5}
+  planning_balanced:
+    capability: task_planning
+    model: deepseek-flash
+    instruction: prompts/planning.md
+    tools: [list_files, search_code, read_file, write_file, replace_text, run_tests, run_command, git_diff]
+    context_policy: full
+    budget: {max_output_tokens: 32000, max_steps: 6}
+  editing_balanced:
+    capability: code_editing
+    model: deepseek-flash
+    instruction: prompts/editing.md
+    tools: [list_files, search_code, read_file, write_file, replace_text, run_tests, run_command, git_diff]
+    context_policy: full
+    budget: {max_output_tokens: 32000, max_steps: 8}
+  verification_fast:
+    capability: verification
+    model: deepseek-flash
+    instruction: prompts/verification.md
+    tools: [list_files, search_code, read_file, write_file, replace_text, run_tests, run_command, git_diff]
+    context_policy: diagnosis
+    budget: {max_output_tokens: 32000, max_steps: 5}
+  diagnosis_deep:
+    capability: failure_diagnosis
+    model: deepseek-flash
+    instruction: prompts/diagnosis.md
+    tools: [list_files, search_code, read_file, write_file, replace_text, run_tests, run_command, git_diff]
+    context_policy: diagnosis
+    budget: {max_output_tokens: 32000, max_steps: 6}
